@@ -4,7 +4,6 @@ Tests for google_to_notion.py Pipedream step.
 import pytest
 import sys
 import os
-from unittest.mock import patch
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -108,8 +107,7 @@ class TestHandler:
 
         assert mock_pd.flow.exit_called is True
 
-    @patch('steps.google_to_notion.check_processed_by_dara', return_value=False)
-    def test_processes_notion_linked_task(self, mock_check, mock_pd, sample_gtask_trigger):
+    def test_processes_notion_linked_task(self, mock_pd, sample_gtask_trigger):
         mock_pd.steps = sample_gtask_trigger
 
         result = handler(mock_pd)
@@ -119,8 +117,7 @@ class TestHandler:
         assert result["NotionUpdate"]["PageId"] is not None
         assert len(result["NotionUpdate"]["PageId"]) == 32
 
-    @patch('steps.google_to_notion.check_processed_by_dara', return_value=False)
-    def test_maps_completed_status(self, mock_check, mock_pd, sample_gtask_trigger_completed):
+    def test_maps_completed_status(self, mock_pd, sample_gtask_trigger_completed):
         mock_pd.steps = sample_gtask_trigger_completed
 
         result = handler(mock_pd)
@@ -128,16 +125,14 @@ class TestHandler:
         assert mock_pd.flow.exit_called is False
         assert result["NotionUpdate"]["ListValue"] == "Completed"
 
-    @patch('steps.google_to_notion.check_processed_by_dara', return_value=False)
-    def test_maps_incomplete_status(self, mock_check, mock_pd, sample_gtask_trigger):
+    def test_maps_incomplete_status(self, mock_pd, sample_gtask_trigger):
         mock_pd.steps = sample_gtask_trigger
 
         result = handler(mock_pd)
 
         assert result["NotionUpdate"]["ListValue"] == "Next Actions"
 
-    @patch('steps.google_to_notion.check_processed_by_dara', return_value=False)
-    def test_extracts_due_date(self, mock_check, mock_pd, sample_gtask_trigger):
+    def test_extracts_due_date(self, mock_pd, sample_gtask_trigger):
         mock_pd.steps = sample_gtask_trigger
 
         result = handler(mock_pd)
@@ -159,22 +154,3 @@ class TestHandler:
         assert mock_pd.flow.exit_called is True
         assert "Could not reliably extract" in mock_pd.flow.exit_message
 
-    @patch('steps.google_to_notion.check_processed_by_dara', return_value=True)
-    def test_exits_when_processed_by_dara(self, mock_check, mock_pd, sample_gtask_trigger):
-        """Handler should exit early if task was already processed by Dara."""
-        mock_pd.steps = sample_gtask_trigger
-
-        handler(mock_pd)
-
-        assert mock_pd.flow.exit_called is True
-        assert "Processed by Dara" in mock_pd.flow.exit_message
-
-    @patch('steps.google_to_notion.check_processed_by_dara', return_value=None)
-    def test_exits_when_dara_check_fails(self, mock_check, mock_pd, sample_gtask_trigger):
-        """Handler should exit early if unable to verify Processed by Dara status."""
-        mock_pd.steps = sample_gtask_trigger
-
-        handler(mock_pd)
-
-        assert mock_pd.flow.exit_called is True
-        assert "Unable to verify" in mock_pd.flow.exit_message
