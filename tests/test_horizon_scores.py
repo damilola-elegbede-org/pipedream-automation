@@ -285,8 +285,8 @@ class TestScoreTasksBatch:
     @patch('steps.update_horizon_scores.call_claude')
     def test_parses_json_response(self, mock_claude):
         mock_claude.return_value = '''[
-            {"task_id": "task_1", "score": 85, "reasoning": "Good alignment"},
-            {"task_id": "task_2", "score": 45, "reasoning": "Moderate alignment"}
+            {"score": 85, "reasoning": "Good alignment"},
+            {"score": 45, "reasoning": "Moderate alignment"}
         ]'''
 
         tasks = [
@@ -306,7 +306,7 @@ class TestScoreTasksBatch:
     def test_handles_json_with_surrounding_text(self, mock_claude):
         # Claude sometimes adds explanatory text around JSON
         mock_claude.return_value = '''Here are the scores:
-        [{"task_id": "task_1", "score": 75, "reasoning": "Aligned"}]
+        [{"score": 75, "reasoning": "Aligned"}]
         That's the result.'''
 
         tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]
@@ -314,7 +314,47 @@ class TestScoreTasksBatch:
         result = score_tasks_batch(tasks, "test rubric", "test_key")
 
         assert len(result) == 1
+        assert result[0]["task_id"] == "task_1"
         assert result[0]["score"] == 75
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_injects_task_ids_positionally(self, mock_claude):
+        """Task IDs are injected by position, not from Claude's response."""
+        mock_claude.return_value = '''[
+            {"task_id": "wrong_id", "score": 90, "reasoning": "Great"},
+            {"score": 60, "reasoning": "OK"}
+        ]'''
+
+        tasks = [
+            {"id": "real_id_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},
+            {"id": "real_id_2", "title": "Task 2", "list": "Waiting For", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}
+        ]
+
+        result = score_tasks_batch(tasks, "test rubric", "test_key")
+
+        # Even if Claude returns a wrong task_id, positional injection overrides it
+        assert result[0]["task_id"] == "real_id_1"
+        assert result[1]["task_id"] == "real_id_2"
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_truncates_on_score_count_mismatch(self, mock_claude):
+        """Extra scores from Claude are truncated to match task count."""
+        mock_claude.return_value = '''[
+            {"score": 80, "reasoning": "Good"},
+            {"score": 50, "reasoning": "OK"},
+            {"score": 30, "reasoning": "Extra"}
+        ]'''
+
+        tasks = [
+            {"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},
+            {"id": "task_2", "title": "Task 2", "list": "Waiting For", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}
+        ]
+
+        result = score_tasks_batch(tasks, "test rubric", "test_key")
+
+        assert len(result) == 2
+        assert result[0]["task_id"] == "task_1"
+        assert result[1]["task_id"] == "task_2"
 
     @patch('steps.update_horizon_scores.call_claude')
     def test_raises_on_invalid_json(self, mock_claude):

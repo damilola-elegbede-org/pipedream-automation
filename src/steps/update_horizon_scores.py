@@ -975,7 +975,6 @@ def score_tasks_batch(tasks, rubric, anthropic_key, session=None):
     for i, task in enumerate(tasks, 1):
         tasks_text += f"""
 Task {i}:
-- ID: {task['id']}
 - Title: {task['title']}
 - List: {task['list']}
 - Project: {task['project'] or 'None'}
@@ -1000,9 +999,11 @@ For each task, provide a score from 0-100 based on alignment with the Horizons o
 - 30-49: Neutral maintenance task or loosely connected
 - 0-29: Misaligned, distraction, or contrary to stated priorities
 
+Return exactly {len(tasks)} scores, one per task, in the same order as listed above.
+
 Return your response as a JSON array with this exact format:
 [
-  {{"task_id": "xxx", "score": 85, "reasoning": "Brief explanation"}},
+  {{"score": 85, "reasoning": "Brief explanation"}},
   ...
 ]
 
@@ -1022,6 +1023,19 @@ IMPORTANT: Return ONLY the JSON array, no other text."""
             )
         json_str = response_text[start_idx:end_idx]
         scores = json.loads(json_str)
+
+        # Validate score count matches task count
+        if len(scores) != len(tasks):
+            print(
+                f"Warning: Score count mismatch: got {len(scores)} scores "
+                f"for {len(tasks)} tasks. Truncating to min."
+            )
+            scores = scores[:len(tasks)]
+
+        # Inject known-good task IDs by position (never trust Claude with IDs)
+        for i, score_entry in enumerate(scores):
+            score_entry["task_id"] = tasks[i]["id"]
+
         return scores
     except json.JSONDecodeError as e:
         raise HorizonScoringError(
