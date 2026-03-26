@@ -5,18 +5,21 @@ import pytest
 from unittest.mock import patch, MagicMock
 import sys
 import os
-import json
+import json  # noqa: F401
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from steps.update_horizon_scores import (
+from steps.update_horizon_scores import (  # noqa: F401
     handler,
     extract_text_from_rich_text,
     parse_blocks_to_text,
     extract_task_info,
     retry_with_backoff,
     fetch_page_blocks,
+    fetch_page_metadata,
+    query_tasks_incremental,
+    query_tasks_unscored,
     call_claude,
     score_tasks_batch,
     markdown_to_notion_blocks,
@@ -290,8 +293,8 @@ class TestScoreTasksBatch:
         ]'''
 
         tasks = [
-            {"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},
-            {"id": "task_2", "title": "Task 2", "list": "Someday/Maybe", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}
+            {"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},  # noqa: E501
+            {"id": "task_2", "title": "Task 2", "list": "Someday/Maybe", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}  # noqa: E501
         ]
 
         result = score_tasks_batch(tasks, "test rubric", "test_key")
@@ -309,7 +312,7 @@ class TestScoreTasksBatch:
         [{"score": 75, "reasoning": "Aligned"}]
         That's the result.'''
 
-        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
 
         result = score_tasks_batch(tasks, "test rubric", "test_key")
 
@@ -326,8 +329,8 @@ class TestScoreTasksBatch:
         ]'''
 
         tasks = [
-            {"id": "real_id_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},
-            {"id": "real_id_2", "title": "Task 2", "list": "Waiting For", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}
+            {"id": "real_id_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},  # noqa: E501
+            {"id": "real_id_2", "title": "Task 2", "list": "Waiting For", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}  # noqa: E501
         ]
 
         result = score_tasks_batch(tasks, "test rubric", "test_key")
@@ -346,8 +349,8 @@ class TestScoreTasksBatch:
         ]'''
 
         tasks = [
-            {"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},
-            {"id": "task_2", "title": "Task 2", "list": "Waiting For", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}
+            {"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},  # noqa: E501
+            {"id": "task_2", "title": "Task 2", "list": "Waiting For", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}  # noqa: E501
         ]
 
         result = score_tasks_batch(tasks, "test rubric", "test_key")
@@ -361,7 +364,7 @@ class TestScoreTasksBatch:
         """Test that invalid JSON raises HorizonScoringError (fail loudly)."""
         mock_claude.return_value = "This is not valid JSON"
 
-        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
 
         with pytest.raises(HorizonScoringError, match="No JSON array found"):
             score_tasks_batch(tasks, "test rubric", "test_key")
@@ -376,8 +379,9 @@ class TestIntegration:
     @patch('steps.update_horizon_scores.generate_rubric')
     @patch('steps.update_horizon_scores.fetch_page_blocks')
     @patch('steps.update_horizon_scores.parse_blocks_to_text')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
     def test_full_workflow_success(
-        self, mock_parse, mock_fetch, mock_rubric, mock_query,
+        self, mock_meta, mock_parse, mock_fetch, mock_rubric, mock_query,
         mock_score, mock_update, mock_pd
     ):
         env = {
@@ -388,7 +392,8 @@ class TestIntegration:
         }
 
         with patch.dict(os.environ, env, clear=True):
-            # Mock the workflow
+            # First run — no state yet → full scan
+            mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
             mock_fetch.return_value = [{"type": "paragraph", "paragraph": {"rich_text": []}}]
             mock_parse.return_value = "Purpose: Be awesome"
             mock_rubric.return_value = "Score based on alignment"
@@ -405,13 +410,16 @@ class TestIntegration:
             assert result["status"] == "Completed"
             assert result["tasks_scored"] == 1
             assert len(result["successful_updates"]) == 1
+            assert result["rubric_source"] == "regenerated"
+            assert result["scan_type"] == "full"
 
     @patch('steps.update_horizon_scores.query_tasks')
     @patch('steps.update_horizon_scores.generate_rubric')
     @patch('steps.update_horizon_scores.fetch_page_blocks')
     @patch('steps.update_horizon_scores.parse_blocks_to_text')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
     def test_returns_no_tasks_message(
-        self, mock_parse, mock_fetch, mock_rubric, mock_query, mock_pd
+        self, mock_meta, mock_parse, mock_fetch, mock_rubric, mock_query, mock_pd
     ):
         env = {
             "NOTION_API_TOKEN": "test_token",
@@ -421,6 +429,7 @@ class TestIntegration:
         }
 
         with patch.dict(os.environ, env, clear=True):
+            mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
             mock_fetch.return_value = [{"type": "paragraph", "paragraph": {"rich_text": []}}]
             mock_parse.return_value = "Purpose: Be awesome"
             mock_rubric.return_value = "Score rubric"
@@ -624,3 +633,241 @@ Score | Meaning
         assert "heading_2" in types
         assert "table" in types
         assert "bulleted_list_item" in types
+
+
+class TestFetchPageMetadata:
+    """Tests for the fetch_page_metadata helper."""
+
+    @patch('steps.update_horizon_scores.retry_with_backoff')
+    def test_returns_page_dict(self, mock_retry):
+        page_data = {
+            "id": "page_123",
+            "last_edited_time": "2024-06-01T12:00:00.000Z",
+            "object": "page",
+        }
+        mock_response = MagicMock()
+        mock_response.json.return_value = page_data
+        mock_retry.return_value = mock_response
+
+        result = fetch_page_metadata("page_123", {"Authorization": "Bearer tok"})
+
+        assert result == page_data
+        assert result["last_edited_time"] == "2024-06-01T12:00:00.000Z"
+
+
+class TestRubricCaching:
+    """Tests for rubric cache hit / miss via handler."""
+
+    ENV = {
+        "NOTION_API_TOKEN": "test_token",
+        "NOTION_DATABASE_ID": "test_db",
+        "NOTION_HORIZONS_PAGE_ID": "test_page",
+        "ANTHROPIC_API_KEY": "test_key",
+    }
+
+    @patch('steps.update_horizon_scores.update_scores_parallel')
+    @patch('steps.update_horizon_scores.score_all_batches_parallel')
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_rubric_cache_hit_skips_block_fetch_and_claude(
+        self, mock_meta, mock_query, mock_score_all, mock_update_all, mock_pd
+    ):
+        """When horizons haven't changed and cache exists, skip block fetch + rubric generation."""
+        with patch.dict(os.environ, self.ENV, clear=True):
+            # Pre-populate state as if a prior run succeeded
+            mock_pd.state["horizons_last_edited_at"] = "2024-06-01T12:00:00.000Z"
+            mock_pd.state["rubric_cache"] = "Cached rubric text"
+            mock_pd.state["last_run_at"] = None  # force full scan
+
+            mock_meta.return_value = {"last_edited_time": "2024-06-01T12:00:00.000Z"}
+            mock_query.return_value = [
+                {"id": "t1", "properties": {"Task name": {"type": "title", "title": [{"plain_text": "T1"}]}}}
+            ]
+            mock_score_all.return_value = [{"task_id": "t1", "score": 70, "reasoning": "ok"}]
+            mock_update_all.return_value = ([{"task_id": "t1", "score": 70, "reasoning": "ok"}], [])
+
+            with patch('steps.update_horizon_scores.fetch_page_blocks') as mock_blocks, \
+                 patch('steps.update_horizon_scores.generate_rubric') as mock_gen:
+                result = handler(mock_pd)
+
+                mock_blocks.assert_not_called()
+                mock_gen.assert_not_called()
+
+            assert result["rubric_source"] == "cache"
+
+    @patch('steps.update_horizon_scores.update_scores_parallel')
+    @patch('steps.update_horizon_scores.score_all_batches_parallel')
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.generate_rubric')
+    @patch('steps.update_horizon_scores.fetch_page_blocks')
+    @patch('steps.update_horizon_scores.parse_blocks_to_text')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_rubric_regenerated_when_horizons_changed(
+        self, mock_meta, mock_parse, mock_blocks, mock_gen,
+        mock_query, mock_score_all, mock_update_all, mock_pd
+    ):
+        """When horizons page has a new last_edited_time, regenerate the rubric."""
+        with patch.dict(os.environ, self.ENV, clear=True):
+            mock_pd.state["horizons_last_edited_at"] = "2024-06-01T12:00:00.000Z"
+            mock_pd.state["rubric_cache"] = "Old rubric"
+            mock_pd.state["last_run_at"] = None  # force full scan
+
+            # Horizons page was edited
+            mock_meta.return_value = {"last_edited_time": "2024-06-15T08:00:00.000Z"}
+            mock_blocks.return_value = [{"type": "paragraph", "paragraph": {"rich_text": []}}]
+            mock_parse.return_value = "New purpose statement"
+            mock_gen.return_value = "New rubric text"
+            mock_query.return_value = [
+                {"id": "t1", "properties": {"Task name": {"type": "title", "title": [{"plain_text": "T1"}]}}}
+            ]
+            mock_score_all.return_value = [{"task_id": "t1", "score": 90, "reasoning": "great"}]
+            mock_update_all.return_value = ([{"task_id": "t1", "score": 90, "reasoning": "great"}], [])
+
+            result = handler(mock_pd)
+
+            mock_gen.assert_called_once()
+            assert result["rubric_source"] == "regenerated"
+            assert mock_pd.state["rubric_cache"] == "New rubric text"
+            assert mock_pd.state["horizons_last_edited_at"] == "2024-06-15T08:00:00.000Z"
+
+
+class TestIncrementalQueries:
+    """Tests for incremental task query, deduplication, and full scan trigger."""
+
+    ENV = {
+        "NOTION_API_TOKEN": "test_token",
+        "NOTION_DATABASE_ID": "test_db",
+        "NOTION_HORIZONS_PAGE_ID": "test_page",
+        "ANTHROPIC_API_KEY": "test_key",
+    }
+
+    @patch('steps.update_horizon_scores.update_scores_parallel')
+    @patch('steps.update_horizon_scores.score_all_batches_parallel')
+    @patch('steps.update_horizon_scores.query_tasks_unscored')
+    @patch('steps.update_horizon_scores.query_tasks_incremental')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_deduplication_task_in_both_queries_scored_once(
+        self, mock_meta, mock_delta, mock_backlog,
+        mock_score_all, mock_update_all, mock_pd
+    ):
+        """A task appearing in both delta and backlog queries is scored only once."""
+        from datetime import datetime, timezone
+        recent = datetime.now(timezone.utc).isoformat()
+        with patch.dict(os.environ, self.ENV, clear=True):
+            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.state["rubric_cache"] = "Cached rubric"
+            mock_pd.state["last_run_at"] = recent
+            mock_pd.state["last_full_scan_at"] = recent
+
+            mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
+
+            shared_task = {"id": "dup_task", "properties": {"Task name": {"type": "title", "title": [{"plain_text": "Dup"}]}}}  # noqa: E501
+            unique_delta = {"id": "delta_only", "properties": {"Task name": {"type": "title", "title": [{"plain_text": "Delta"}]}}}  # noqa: E501
+            unique_backlog = {"id": "backlog_only", "properties": {"Task name": {"type": "title", "title": [{"plain_text": "Backlog"}]}}}  # noqa: E501
+
+            mock_delta.return_value = [shared_task, unique_delta]
+            mock_backlog.return_value = [shared_task, unique_backlog]
+
+            mock_score_all.return_value = [
+                {"task_id": "dup_task", "score": 50, "reasoning": "ok"},
+                {"task_id": "delta_only", "score": 60, "reasoning": "ok"},
+                {"task_id": "backlog_only", "score": 40, "reasoning": "ok"},
+            ]
+            mock_update_all.return_value = (
+                [
+                    {"task_id": "dup_task", "score": 50, "reasoning": "ok"},
+                    {"task_id": "delta_only", "score": 60, "reasoning": "ok"},
+                    {"task_id": "backlog_only", "score": 40, "reasoning": "ok"},
+                ],
+                [],
+            )
+
+            result = handler(mock_pd)
+
+            assert result["scan_type"] == "incremental"
+            assert result["delta_count"] == 2
+            assert result["backlog_count"] == 2
+            # 3 unique tasks after dedup (dup_task counted once)
+            assert result["tasks_scored"] == 3
+
+    @patch('steps.update_horizon_scores.update_scores_parallel')
+    @patch('steps.update_horizon_scores.score_all_batches_parallel')
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_full_scan_when_last_full_scan_over_30_days(
+        self, mock_meta, mock_query, mock_score_all, mock_update_all, mock_pd
+    ):
+        """Full scan triggered when last_full_scan_at is >30 days ago."""
+        with patch.dict(os.environ, self.ENV, clear=True):
+            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.state["rubric_cache"] = "Cached rubric"
+            mock_pd.state["last_run_at"] = "2024-06-01T00:00:00.000Z"
+            # Last full scan was 60 days ago
+            mock_pd.state["last_full_scan_at"] = "2024-01-01T00:00:00.000Z"
+
+            mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
+            mock_query.return_value = [
+                {"id": "t1", "properties": {"Task name": {"type": "title", "title": [{"plain_text": "T1"}]}}}
+            ]
+            mock_score_all.return_value = [{"task_id": "t1", "score": 70, "reasoning": "ok"}]
+            mock_update_all.return_value = ([{"task_id": "t1", "score": 70, "reasoning": "ok"}], [])
+
+            result = handler(mock_pd)
+
+            assert result["scan_type"] == "full"
+            mock_query.assert_called_once()
+            assert mock_pd.state["last_full_scan_at"] is not None
+
+    @patch('steps.update_horizon_scores.update_scores_parallel')
+    @patch('steps.update_horizon_scores.score_all_batches_parallel')
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.generate_rubric')
+    @patch('steps.update_horizon_scores.fetch_page_blocks')
+    @patch('steps.update_horizon_scores.parse_blocks_to_text')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_first_run_no_state_behaves_as_full_scan(
+        self, mock_meta, mock_parse, mock_blocks, mock_gen,
+        mock_query, mock_score_all, mock_update_all, mock_pd
+    ):
+        """First run (empty state) should do full scan and regenerate rubric."""
+        with patch.dict(os.environ, self.ENV, clear=True):
+            # pd.state is empty (first run)
+            mock_meta.return_value = {"last_edited_time": "2024-06-01T12:00:00.000Z"}
+            mock_blocks.return_value = [{"type": "paragraph", "paragraph": {"rich_text": []}}]
+            mock_parse.return_value = "Purpose: Be awesome"
+            mock_gen.return_value = "Fresh rubric"
+            mock_query.return_value = [
+                {"id": "t1", "properties": {"Task name": {"type": "title", "title": [{"plain_text": "T1"}]}}}
+            ]
+            mock_score_all.return_value = [{"task_id": "t1", "score": 80, "reasoning": "good"}]
+            mock_update_all.return_value = ([{"task_id": "t1", "score": 80, "reasoning": "good"}], [])
+
+            result = handler(mock_pd)
+
+            assert result["scan_type"] == "full"
+            assert result["rubric_source"] == "regenerated"
+            mock_gen.assert_called_once()
+            mock_query.assert_called_once()
+            # State should be populated after run
+            assert mock_pd.state["last_run_at"] is not None
+            assert mock_pd.state["rubric_cache"] == "Fresh rubric"
+            assert mock_pd.state["last_full_scan_at"] is not None
+
+    def test_query_tasks_unscored_filter_shape(self):
+        """query_tasks_unscored must include Horizon Score is_empty in the filter."""
+        mock_session = MagicMock()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"results": [], "has_more": False}
+        mock_response.raise_for_status = MagicMock()
+        mock_session.post.return_value = mock_response
+
+        query_tasks_unscored("db_123", {"Authorization": "Bearer tok"}, session=mock_session)
+
+        call_args = mock_session.post.call_args
+        payload = call_args[1]["json"] if "json" in call_args[1] else call_args.kwargs["json"]
+        and_conditions = payload["filter"]["and"]
+
+        # Find the Horizon Score filter
+        hs_filters = [f for f in and_conditions if f.get("property") == "Horizon Score"]
+        assert len(hs_filters) == 1
+        assert hs_filters[0] == {"property": "Horizon Score", "number": {"is_empty": True}}

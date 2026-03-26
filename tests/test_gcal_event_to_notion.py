@@ -1,7 +1,7 @@
 """
 Tests for gcal_event_to_notion.py Pipedream step.
 """
-import pytest
+import pytest  # noqa: F401
 import sys
 import os
 
@@ -77,7 +77,7 @@ class TestHandler:
             }
         }
 
-        result = handler(mock_pd)
+        result = handler(mock_pd)  # noqa: F841
 
         assert mock_pd.flow.exit_called is True
         assert "does not have a Notion URL" in mock_pd.flow.exit_message
@@ -91,7 +91,7 @@ class TestHandler:
             }
         }
 
-        result = handler(mock_pd)
+        result = handler(mock_pd)  # noqa: F841
 
         assert mock_pd.flow.exit_called is True
 
@@ -140,7 +140,7 @@ class TestHandler:
             }
         }
 
-        result = handler(mock_pd)
+        result = handler(mock_pd)  # noqa: F841
 
         assert mock_pd.flow.exit_called is True
         assert "Could not reliably extract" in mock_pd.flow.exit_message

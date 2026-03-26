@@ -16,6 +16,7 @@ import requests
 import time
 import json
 import random
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -124,6 +125,126 @@ def fetch_page_blocks(page_id, headers, session=None):
         start_cursor = data.get("next_cursor")
 
     return all_blocks
+
+
+def fetch_page_metadata(page_id, headers, session=None):
+    """
+    Fetch page metadata (not blocks) via GET /v1/pages/{page_id}.
+
+    Returns the raw response JSON including last_edited_time.
+    """
+    http = session or requests
+    url = f"{NOTION_API_BASE}/pages/{page_id}"
+
+    response = retry_with_backoff(
+        lambda: http.get(url, headers=headers, timeout=60)
+    )
+    return response.json()
+
+
+def query_tasks_incremental(database_id, headers, since_ts, session=None):
+    """
+    Query tasks edited or created since `since_ts` (ISO timestamp).
+
+    Combines the existing List + empty Due filter with a last_edited_time > since_ts filter.
+
+    Args:
+        database_id: Notion database ID
+        headers: API headers
+        since_ts: ISO 8601 timestamp string — only return tasks edited after this time
+        session: Optional requests.Session for connection pooling
+
+    Returns a list of task objects.
+    """
+    http = session or requests
+    all_tasks = []
+    url = f"{NOTION_API_BASE}/databases/{database_id}/query"
+    start_cursor = None
+
+    or_conditions = [
+        {"property": "List", "status": {"equals": v}} for v in LIST_VALUES
+    ]
+
+    filter_payload = {
+        "filter": {
+            "and": [
+                {"or": or_conditions},
+                {"property": "Due", "date": {"is_empty": True}},
+                {"timestamp": "last_edited_time", "last_edited_time": {"after": since_ts}},
+            ]
+        },
+        "page_size": 100,
+    }
+
+    while True:
+        if start_cursor:
+            filter_payload["start_cursor"] = start_cursor
+
+        response = retry_with_backoff(
+            lambda fp=filter_payload: http.post(url, headers=headers, json=fp, timeout=60)
+        )
+        data = response.json()
+        tasks = data.get("results", [])
+        all_tasks.extend(tasks)
+
+        if not data.get("has_more"):
+            break
+        start_cursor = data.get("next_cursor")
+        time.sleep(0.1)
+
+    return all_tasks
+
+
+def query_tasks_unscored(database_id, headers, session=None):
+    """
+    Query tasks that have no Horizon Score (backlog of unscored tasks).
+
+    Combines List + empty Due filter with Horizon Score is_empty.
+
+    Args:
+        database_id: Notion database ID
+        headers: API headers
+        session: Optional requests.Session for connection pooling
+
+    Returns a list of task objects.
+    """
+    http = session or requests
+    all_tasks = []
+    url = f"{NOTION_API_BASE}/databases/{database_id}/query"
+    start_cursor = None
+
+    or_conditions = [
+        {"property": "List", "status": {"equals": v}} for v in LIST_VALUES
+    ]
+
+    filter_payload = {
+        "filter": {
+            "and": [
+                {"or": or_conditions},
+                {"property": "Due", "date": {"is_empty": True}},
+                {"property": "Horizon Score", "number": {"is_empty": True}},
+            ]
+        },
+        "page_size": 100,
+    }
+
+    while True:
+        if start_cursor:
+            filter_payload["start_cursor"] = start_cursor
+
+        response = retry_with_backoff(
+            lambda fp=filter_payload: http.post(url, headers=headers, json=fp, timeout=60)
+        )
+        data = response.json()
+        tasks = data.get("results", [])
+        all_tasks.extend(tasks)
+
+        if not data.get("has_more"):
+            break
+        start_cursor = data.get("next_cursor")
+        time.sleep(0.1)
+
+    return all_tasks
 
 
 def find_inline_databases(blocks):
@@ -576,7 +697,7 @@ def markdown_to_notion_blocks(markdown_text):
             bold_text = stripped[2:-2]
             blocks.append({
                 "type": "paragraph",
-                "paragraph": {"rich_text": [{"type": "text", "text": {"content": bold_text}, "annotations": {"bold": True}}]}
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": bold_text}, "annotations": {"bold": True}}]}  # noqa: E501
             })
         # Regular paragraphs
         else:
@@ -700,15 +821,15 @@ In GTD, "Horizons of Focus" represent different altitudes of perspective:
 - Ground: Next Actions - Individual tasks
 
 ## Your Task
-Create a scoring rubric (0-100) that evaluates how well a task aligns with the person's stated identity and priorities from their Horizons of Focus document below.
+Create a scoring rubric (0-100) that evaluates how well a task aligns with the person's stated identity and priorities from their Horizons of Focus document below.  # noqa: E501
 
-The "Horizon Score" serves as a **priority indicator** - helping the user decide which flexible tasks (no due date) to tackle next based on who they have said they want to be.
+The "Horizon Score" serves as a **priority indicator** - helping the user decide which flexible tasks (no due date) to tackle next based on who they have said they want to be.  # noqa: E501
 
 ## Document Structure
 The Horizons document includes:
 - Purpose and Core Values
 - Vision
-- Areas of Focus: Spirituality, Personal Development, Health, Romance, Family, Business & Career, Finances, Fun & Recreation, Social, Humanitarian
+- Areas of Focus: Spirituality, Personal Development, Health, Romance, Family, Business & Career, Finances, Fun & Recreation, Social, Humanitarian  # noqa: E501
 - In Progress Goals (each tagged with relevant Focus Areas)
 
 ## Scoring Guidelines
@@ -732,7 +853,7 @@ Here is the EXACT structure to follow:
 
 # 🎯 Horizon Score Rubric
 
-[CALLOUT:📋] This rubric evaluates how well your tasks align with your stated Horizons of Focus - your purpose, values, vision, and goals. Use it to prioritize flexible tasks based on who you want to be. [/CALLOUT]
+[CALLOUT:📋] This rubric evaluates how well your tasks align with your stated Horizons of Focus - your purpose, values, vision, and goals. Use it to prioritize flexible tasks based on who you want to be. [/CALLOUT]  # noqa: E501
 
 ---
 
@@ -752,7 +873,7 @@ Score | Meaning | Criteria
 
 ## 🎯 Your High-Leverage Goals (90-100 points)
 
-[CALLOUT:💡] Tasks that directly advance these goals score 90-100. These goals span multiple Focus Areas, meaning progress here creates compounding benefits. [/CALLOUT]
+[CALLOUT:💡] Tasks that directly advance these goals score 90-100. These goals span multiple Focus Areas, meaning progress here creates compounding benefits. [/CALLOUT]  # noqa: E501
 
 (List their actual goals that span 3+ focus areas with descriptions)
 
@@ -787,7 +908,7 @@ Focus Area | Active Goals | Examples
 
 ## ⚠️ Potential Distractions (0-9 points)
 
-[CALLOUT:⚠️] Be cautious of tasks that don't align with any stated goal, value, or focus area. These may be distractions pulling you away from your priorities. [/CALLOUT]
+[CALLOUT:⚠️] Be cautious of tasks that don't align with any stated goal, value, or focus area. These may be distractions pulling you away from your priorities. [/CALLOUT]  # noqa: E501
 
 Create this rubric based on THIS person's specific horizons. Be concrete - use their actual goals, values, and areas."""
 
@@ -865,7 +986,7 @@ def query_tasks(database_id, headers, session=None):
             original_count = len(tasks)
             tasks = [t for t in tasks
                      if not t.get("properties", {}).get("Due", {}).get("date")]
-            print(f"  Fetched {original_count} tasks, {len(tasks)} without due dates (total: {len(all_tasks) + len(tasks)})")
+            print(f"  Fetched {original_count} tasks, {len(tasks)} without due dates (total: {len(all_tasks) + len(tasks)})")  # noqa: E501
         else:
             print(f"  Fetched {len(tasks)} tasks (total: {len(all_tasks) + len(tasks)})")
 
@@ -1201,8 +1322,14 @@ def update_scores_parallel(scores, headers, session=None):
     return successful, errors
 
 
-def handler(pd: "pipedream"):
-    """Main entry point for Pipedream step."""
+def handler(pd: "pipedream"):  # noqa: F821
+    """Main entry point for Pipedream step.
+
+    Supports incremental scoring via pd.state persistence:
+    - Caches rubric and only regenerates when Horizons page changes
+    - Delta queries for recently-edited tasks + unscored backlog
+    - Monthly full scan for drift detection
+    """
 
     # --- 1. Get Credentials from Environment ---
     notion_token = os.environ.get("NOTION_API_TOKEN")
@@ -1242,112 +1369,189 @@ def handler(pd: "pipedream"):
 
     successful_updates = []
     errors = []
+    rubric_source = "regenerated"
+    scan_type = "incremental"
+    delta_count = 0
+    backlog_count = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     try:
-        # --- 3. Fetch all data in PARALLEL for speed ---
-        print("Step 1: Fetching Horizons, Core Values, and Goals in parallel...")
+        # --- 3. Rubric decision (cheap metadata check) ---
+        print("Step 1: Checking if Horizons of Focus have changed...")
+        page_meta = fetch_page_metadata(horizons_page_id, notion_headers, notion_session)
+        current_edited_at = page_meta.get("last_edited_time")
 
-        # Helper functions for parallel execution (use sessions)
-        def fetch_horizons():
-            blocks = fetch_page_blocks(horizons_page_id, notion_headers, notion_session)
-            content = parse_blocks_to_text(blocks)
-            return blocks, content
+        cached_edited_at = pd.state.get("horizons_last_edited_at")
+        cached_rubric = pd.state.get("rubric_cache")
 
-        def fetch_values_safe():
-            if not core_values_db_id:
-                return None
-            try:
-                return fetch_core_values(core_values_db_id, notion_headers, notion_session)
-            except Exception as e:
-                print(f"  Warning: Could not fetch Core Values: {e}")
-                return None
-
-        def fetch_goals_safe():
-            if not goals_db_id:
-                return None
-            try:
-                return fetch_in_progress_goals(goals_db_id, notion_headers, notion_session)
-            except Exception as e:
-                print(f"  Warning: Could not fetch Goals: {e}")
-                return None
-
-        # Execute all fetches in parallel
-        with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as executor:
-            horizons_future = executor.submit(fetch_horizons)
-            values_future = executor.submit(fetch_values_safe)
-            goals_future = executor.submit(fetch_goals_safe)
-
-            # Wait for all results
-            blocks, horizons_content = horizons_future.result()
-            core_values = values_future.result()
-            goals = goals_future.result()
-
-        print(f"  Fetched {len(blocks)} blocks, {len(horizons_content)} characters of content")
-
-        if not horizons_content.strip():
-            raise HorizonScoringError("Horizons of Focus page is empty or has no readable content")
-
-        # --- 3b. Append Core Values to horizons content ---
-        if core_values:
-            horizons_content += "\n\n## Core Values\n"
-            for value in core_values:
-                horizons_content += f"• {value}\n"
-            print(f"  Added {len(core_values)} core values")
-        elif core_values_db_id:
-            print("  No core values found")
+        if cached_edited_at == current_edited_at and cached_rubric:
+            # Horizons unchanged and cache exists — skip block fetch + Claude rubric call
+            rubric = cached_rubric
+            rubric_source = "cache"
+            print("  Rubric: reused from cache")
         else:
-            print("  NOTION_CORE_VALUES_DB_ID not set, skipping Core Values")
+            # Horizons changed OR cache missing — full regeneration
+            reason = "horizons changed" if cached_edited_at != current_edited_at else "cache missing"
+            print(f"  Rubric: regenerating ({reason})")
 
-        # --- 3c. Append In Progress Goals to horizons content ---
-        if goals:
-            horizons_content += "\n\n## In Progress Goals (ordered by cross-area impact)\n"
-            for goal in goals:
-                areas_str = ", ".join(goal["focus_areas"]) if goal["focus_areas"] else "No specific area"
-                # Include description if available
-                desc = goal.get("description", "")
-                if desc:
-                    horizons_content += f"• {goal['name']} [Focus Areas: {areas_str}]\n  Description: {desc}\n"
-                else:
-                    horizons_content += f"• {goal['name']} [Focus Areas: {areas_str}]\n"
-            print(f"  Added {len(goals)} in-progress goals")
-        elif goals_db_id:
-            print("  No in-progress goals found")
+            # Fetch horizons content, core values, and goals in parallel
+            def fetch_horizons():
+                blocks = fetch_page_blocks(horizons_page_id, notion_headers, notion_session)
+                content = parse_blocks_to_text(blocks)
+                return blocks, content
+
+            def fetch_values_safe():
+                if not core_values_db_id:
+                    return None
+                try:
+                    return fetch_core_values(core_values_db_id, notion_headers, notion_session)
+                except Exception as e:
+                    print(f"  Warning: Could not fetch Core Values: {e}")
+                    return None
+
+            def fetch_goals_safe():
+                if not goals_db_id:
+                    return None
+                try:
+                    return fetch_in_progress_goals(goals_db_id, notion_headers, notion_session)
+                except Exception as e:
+                    print(f"  Warning: Could not fetch Goals: {e}")
+                    return None
+
+            with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as executor:
+                horizons_future = executor.submit(fetch_horizons)
+                values_future = executor.submit(fetch_values_safe)
+                goals_future = executor.submit(fetch_goals_safe)
+
+                blocks, horizons_content = horizons_future.result()
+                core_values = values_future.result()
+                goals = goals_future.result()
+
+            print(f"  Fetched {len(blocks)} blocks, {len(horizons_content)} characters of content")
+
+            if not horizons_content.strip():
+                raise HorizonScoringError("Horizons of Focus page is empty or has no readable content")
+
+            # Append Core Values
+            if core_values:
+                horizons_content += "\n\n## Core Values\n"
+                for value in core_values:
+                    horizons_content += f"• {value}\n"
+                print(f"  Added {len(core_values)} core values")
+            elif core_values_db_id:
+                print("  No core values found")
+            else:
+                print("  NOTION_CORE_VALUES_DB_ID not set, skipping Core Values")
+
+            # Append In Progress Goals
+            if goals:
+                horizons_content += "\n\n## In Progress Goals (ordered by cross-area impact)\n"
+                for goal in goals:
+                    areas_str = ", ".join(goal["focus_areas"]) if goal["focus_areas"] else "No specific area"
+                    desc = goal.get("description", "")
+                    if desc:
+                        horizons_content += f"• {goal['name']} [Focus Areas: {areas_str}]\n  Description: {desc}\n"
+                    else:
+                        horizons_content += f"• {goal['name']} [Focus Areas: {areas_str}]\n"
+                print(f"  Added {len(goals)} in-progress goals")
+            elif goals_db_id:
+                print("  No in-progress goals found")
+            else:
+                print("  NOTION_GOALS_DB_ID not set, skipping Goals")
+
+            # Generate rubric
+            print("\n  Generating scoring rubric with Claude...")
+            rubric = generate_rubric(horizons_content, anthropic_key, anthropic_session)
+
+            # Save rubric to Notion page (if configured)
+            if rubric_page_id:
+                print("  Saving rubric to Notion page...")
+                try:
+                    save_rubric_to_notion(rubric, rubric_page_id, notion_headers, notion_session)
+                    print(f"  Rubric saved: https://notion.so/{rubric_page_id.replace('-', '')}")
+                except Exception as e:
+                    print(f"  Warning: Failed to save rubric to Notion: {e}")
+
+            # Update rubric cache in state
+            pd.state["horizons_last_edited_at"] = current_edited_at
+            pd.state["rubric_cache"] = rubric
+
+        # --- 4. Task query decision ---
+        last_run_at = pd.state.get("last_run_at")
+        last_full_scan_at = pd.state.get("last_full_scan_at")
+
+        # Determine if full scan is needed
+        needs_full_scan = False
+        if last_full_scan_at is None:
+            needs_full_scan = True
         else:
-            print("  NOTION_GOALS_DB_ID not set, skipping Goals")
-
-        # --- 4. Generate scoring rubric ---
-        print("\nStep 2: Generating scoring rubric with Claude...")
-        rubric = generate_rubric(horizons_content, anthropic_key, anthropic_session)
-
-        # --- 4b. Save rubric to Notion page (if configured) ---
-        if rubric_page_id:
-            print("  Saving rubric to Notion page...")
             try:
-                save_rubric_to_notion(rubric, rubric_page_id, notion_headers, notion_session)
-                print(f"  Rubric saved: https://notion.so/{rubric_page_id.replace('-', '')}")
-            except Exception as e:
-                print(f"  Warning: Failed to save rubric to Notion: {e}")
+                last_full_dt = datetime.fromisoformat(last_full_scan_at.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) - last_full_dt > timedelta(days=30):
+                    needs_full_scan = True
+            except (ValueError, AttributeError):
+                needs_full_scan = True
 
-        # --- 5. Query tasks ---
-        print(f"\nStep 3: Querying tasks with List in {LIST_VALUES}...")
-        tasks = query_tasks(database_id, notion_headers, notion_session)
-        print(f"  Found {len(tasks)} tasks to score")
+        if needs_full_scan or last_run_at is None:
+            # Full scan path
+            scan_type = "full"
+            if last_run_at is None:
+                print("\nStep 2: First run — performing full scan...")
+            else:
+                print("\nStep 2: Full scan triggered (monthly drift detection)")
+            tasks = query_tasks(database_id, notion_headers, notion_session)
+            delta_count = len(tasks)
+            backlog_count = 0
+            pd.state["last_full_scan_at"] = now_iso
+            print(f"  Found {len(tasks)} tasks (full scan)")
+        else:
+            # Incremental path: delta + unscored backlog
+            print(f"\nStep 2: Incremental query (since {last_run_at})...")
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                delta_future = executor.submit(
+                    query_tasks_incremental, database_id, notion_headers, last_run_at, notion_session
+                )
+                backlog_future = executor.submit(
+                    query_tasks_unscored, database_id, notion_headers, notion_session
+                )
+                delta_tasks = delta_future.result()
+                backlog_tasks = backlog_future.result()
+
+            delta_count = len(delta_tasks)
+            backlog_count = len(backlog_tasks)
+
+            # Deduplicate by task ID
+            seen_ids = set()
+            tasks = []
+            for task in delta_tasks + backlog_tasks:
+                tid = task.get("id")
+                if tid not in seen_ids:
+                    seen_ids.add(tid)
+                    tasks.append(task)
+
+            print(f"  Delta: {delta_count} tasks | Unscored backlog: {backlog_count} tasks | Union after dedup: {len(tasks)} tasks")  # noqa: E501
 
         if not tasks:
+            pd.state["last_run_at"] = now_iso
             return {
                 "status": "Completed",
                 "message": "No tasks found matching filter criteria",
                 "tasks_scored": 0,
                 "successful_updates": [],
-                "errors": []
+                "errors": [],
+                "rubric_source": rubric_source,
+                "scan_type": scan_type,
+                "delta_count": delta_count,
+                "backlog_count": backlog_count,
             }
 
-        # --- 6. Extract task info for scoring ---
-        print("\nStep 4: Extracting task information...")
+        # --- 5. Extract task info for scoring ---
+        print("\nStep 3: Extracting task information...")
         task_infos = [extract_task_info(task) for task in tasks]
 
-        # --- 7. Score tasks in parallel batches ---
-        print(f"\nStep 5: Scoring tasks in parallel batches of {BATCH_SIZE}...")
+        # --- 6. Score tasks in parallel batches ---
+        print(f"\nStep 4: Scoring tasks in parallel batches of {BATCH_SIZE}...")
         task_batches = [
             task_infos[i:i + BATCH_SIZE]
             for i in range(0, len(task_infos), BATCH_SIZE)
@@ -1355,8 +1559,8 @@ def handler(pd: "pipedream"):
         all_scores = score_all_batches_parallel(task_batches, rubric, anthropic_key, anthropic_session)
         print(f"  Received {len(all_scores)} scores from Claude")
 
-        # --- 8. Update Notion with scores in parallel ---
-        print("\nStep 6: Updating Horizon Scores in Notion (parallel)...")
+        # --- 7. Update Notion with scores in parallel ---
+        print("\nStep 5: Updating Horizon Scores in Notion (parallel)...")
         successful_updates, errors = update_scores_parallel(all_scores, notion_headers, notion_session)
 
     except HorizonScoringError:
@@ -1370,7 +1574,9 @@ def handler(pd: "pipedream"):
         notion_session.close()
         anthropic_session.close()
 
-    # --- 9. Return summary ---
+    # --- 8. Write state and return summary ---
+    pd.state["last_run_at"] = now_iso
+
     status = "Completed" if not errors else "Partial"
     print("\n--- Processing Complete ---")
     print(f"Successfully updated: {len(successful_updates)}")
@@ -1381,5 +1587,9 @@ def handler(pd: "pipedream"):
         "tasks_scored": len(successful_updates),
         "successful_updates": successful_updates,
         "errors": errors,
-        "rubric_preview": rubric[:500] if 'rubric' in dir() else None
+        "rubric_preview": rubric[:500] if 'rubric' in dir() else None,
+        "rubric_source": rubric_source,
+        "scan_type": scan_type,
+        "delta_count": delta_count,
+        "backlog_count": backlog_count,
     }

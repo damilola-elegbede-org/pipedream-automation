@@ -124,7 +124,7 @@ def validate_notion_page_id(page_id):
     return None
 
 
-def handler(pd: "pipedream"):
+def handler(pd: "pipedream"):  # noqa: F821
     """
     Processes Google Calendar event triggers, checks if they originated from Notion,
     and extracts relevant details including the Notion Page ID from the location URL.
@@ -148,7 +148,7 @@ def handler(pd: "pipedream"):
     page_id = validate_notion_page_id(raw_page_id)
 
     if not page_id:
-        exit_message = f"Could not reliably extract/validate Notion Page ID from location: '{location}' for event '{event_summary}'. Raw extraction: '{raw_page_id}'. Skipping."
+        exit_message = f"Could not reliably extract/validate Notion Page ID from location: '{location}' for event '{event_summary}'. Raw extraction: '{raw_page_id}'. Skipping."  # noqa: E501
         logger.warning(exit_message)
         pd.flow.exit(exit_message)
         return
@@ -170,7 +170,7 @@ def handler(pd: "pipedream"):
 
     # Fallback: If both dateTime and date are somehow missing
     if start_time is None:
-        logger.warning(f"Could not find 'dateTime' or 'date' in start object: {start_obj}. Using raw object string as fallback.")
+        logger.warning(f"Could not find 'dateTime' or 'date' in start object: {start_obj}. Using raw object string as fallback.")  # noqa: E501
         start_time = str(start_obj)
     if end_time is None:
         logger.warning(f"Could not find 'dateTime' or 'date' in end object: {end_obj}. Using start_time as fallback.")

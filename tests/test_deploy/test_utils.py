@@ -4,7 +4,7 @@ import base64
 import json
 import os
 import time
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from unittest.mock import patch
 
 import pytest
