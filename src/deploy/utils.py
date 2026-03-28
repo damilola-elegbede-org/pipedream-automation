@@ -16,6 +16,9 @@ from .exceptions import AuthenticationError
 # Default path for .env.local file
 ENV_LOCAL_PATH = Path(".env.local")
 
+# Canonical credentials path — used as fallback when repo .env.local is missing vars
+CANONICAL_ENV_PATH = Path.home() / ".openclaw-dara/credentials/pipedream/.env.local"
+
 
 def load_env_local(env_path: Optional[Path] = None) -> dict[str, str]:
     """
@@ -56,17 +59,44 @@ def load_and_set_env_local(env_path: Optional[Path] = None) -> dict[str, str]:
     """
     Load .env.local and set as environment variables.
 
+    Priority order for loading:
+    1. Explicit ``env_path`` argument (if provided)
+    2. ``./env.local`` in the current working directory (repo root)
+    3. ``~/.openclaw-dara/credentials/pipedream/.env.local`` (canonical fallback)
+
+    Variables from lower-priority sources only fill in *missing* keys — they
+    never override values already set by a higher-priority source or by the
+    process environment.
+
     Args:
-        env_path: Path to env file (defaults to .env.local)
+        env_path: Explicit path to env file.  When omitted the discovery
+            order above is used.
 
     Returns:
-        Dictionary of loaded environment variables
+        Dictionary of all environment variables that were loaded (merged
+        across all sources that were consulted).
     """
-    env_vars = load_env_local(env_path)
-    for key, value in env_vars.items():
-        if key not in os.environ:  # Don't override existing env vars
-            os.environ[key] = value
-    return env_vars
+    loaded: dict[str, str] = {}
+
+    def _apply(path: Path) -> None:
+        """Load ``path`` and set any vars not yet known."""
+        if not path.exists():
+            return
+        for key, value in load_env_local(path).items():
+            if key not in os.environ and key not in loaded:
+                os.environ[key] = value
+                loaded[key] = value
+
+    if env_path is not None:
+        # Caller gave us an explicit path — honour it exclusively.
+        _apply(env_path)
+    else:
+        # Phase 1: repo-local .env.local (CWD)
+        _apply(ENV_LOCAL_PATH)
+        # Phase 2: canonical credentials file (fills any gaps left by Phase 1)
+        _apply(CANONICAL_ENV_PATH)
+
+    return loaded
 
 
 def save_cookies_to_env_local(

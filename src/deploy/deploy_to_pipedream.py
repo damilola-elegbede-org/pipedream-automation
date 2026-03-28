@@ -54,6 +54,7 @@ from .exceptions import (
 )
 from .selectors import (
     CODE_EDITOR,
+    CODEMIRROR6_EDITOR,
     LOGGED_IN_INDICATOR,
     LOGIN_BUTTON,
     SAVED_INDICATOR,
@@ -458,17 +459,19 @@ class PipedreamSyncer:
 
         self.log("Expanding CODE section...", "debug")
 
-        # Check if editor is already visible (has size and not hidden)
+        # Check if editor is already visible (has size and not hidden).
+        # CM6 (.cm-editor) is checked first as it is Pipedream's current editor.
         try:
             visible_editor = await self.page.evaluate("""
                 () => {
-                    const editors = document.querySelectorAll('.monaco-editor, .cm-editor');
+                    // CM6 first, then Monaco, then CM5
+                    const editors = document.querySelectorAll('.cm-editor, .monaco-editor, .CodeMirror');
                     for (const editor of editors) {
                         const rect = editor.getBoundingClientRect();
                         const style = window.getComputedStyle(editor);
-                        // Check if editor has size and is not hidden
+                        // Check if editor has size and is not hidden.
                         // Note: Don't require top >= 0 because editors in scrollable
-                        // panels can have negative top while still being visible
+                        // panels can have negative top while still being visible.
                         const isVisible = (
                             rect.width > 100 &&
                             rect.height > 100 &&
@@ -522,7 +525,8 @@ class PipedreamSyncer:
                     # Check if editor appeared
                     editor_visible = await self.page.evaluate("""
                         () => {
-                            const editors = document.querySelectorAll('.monaco-editor, .cm-editor');
+                            // CM6 first, then Monaco, then CM5
+                            const editors = document.querySelectorAll('.cm-editor, .monaco-editor, .CodeMirror');
                             for (const editor of editors) {
                                 const rect = editor.getBoundingClientRect();
                                 const style = window.getComputedStyle(editor);
@@ -550,10 +554,10 @@ class PipedreamSyncer:
         except Exception:
             pass
 
-        # Final check
+        # Final check — CM6 first, then Monaco, then CM5
         try:
             await self.page.wait_for_selector(
-                ".monaco-editor, .cm-editor",
+                CODE_EDITOR,
                 state="visible",
                 timeout=3000
             )
@@ -652,8 +656,8 @@ class PipedreamSyncer:
                         const els = document.querySelectorAll(sel);
                         results[sel] = els.length;
                     });
-                    // Also get detailed rect info for each editor
-                    const editors = document.querySelectorAll('.monaco-editor, .cm-editor');
+                    // Also get detailed rect info for each editor (CM6 first, then Monaco)
+                    const editors = document.querySelectorAll('.cm-editor, .monaco-editor, .CodeMirror');
                     const rects = [];
                     editors.forEach((e, i) => {
                         const rect = e.getBoundingClientRect();
@@ -678,11 +682,14 @@ class PipedreamSyncer:
             self.log(f"  Debug check failed: {e}", "warn")
 
         # Step 1: Find THE LARGEST visible editor (CODE editor, not config panel!)
-        # Pipedream shows multiple editors - config panel (small) and code editor (large)
-        # We must target the LARGEST one to avoid pasting into the config panel
+        # Pipedream shows multiple editors — config panel (small) and code editor (large).
+        # We must target the LARGEST one to avoid pasting into the config panel.
+        # Selector priority: CM6 (.cm-editor) > Monaco (.monaco-editor) > CM5 (.CodeMirror)
+        # CM6 is Pipedream's current Python step editor (as of 2025/2026).
         visible_editor = await self.page.evaluate("""
             () => {
-                const selectors = ['.monaco-editor', '.cm-editor', '.CodeMirror'];
+                // Priority order: CM6 first (current Pipedream), then Monaco, then CM5
+                const selectors = ['.cm-editor', '.monaco-editor', '.CodeMirror'];
                 let bestEditor = null;
                 let bestSel = null;
                 let maxHeight = 0;
@@ -692,9 +699,9 @@ class PipedreamSyncer:
                     for (const editor of editors) {
                         const rect = editor.getBoundingClientRect();
                         const style = window.getComputedStyle(editor);
-                        // Check if visible: has size and not hidden
+                        // Check if visible: has size and not hidden.
                         // Note: Don't check top >= 0 because editors in scrollable panels
-                        // can have negative top values while still being visible
+                        // can have negative top values while still being visible.
                         if (rect.width > 100 && rect.height > 100 &&
                             style.display !== 'none' &&
                             style.visibility !== 'hidden') {
@@ -1169,24 +1176,29 @@ class PipedreamSyncer:
                 await self.click_code_tab()
                 await asyncio.sleep(1)
 
-                # Find the CODE editor (largest height = code, not config panel)
-                # Mark it and use clipboard to read full content
+                # Find the CODE editor (largest height = code, not config panel).
+                # CM6 (.cm-editor) is Pipedream's current Python step editor.
+                # Fall back to Monaco and CM5 for resilience.
                 editor_found = await self.page.evaluate("""
                     () => {
-                        const cmEditors = document.querySelectorAll('.cm-editor');
+                        // CM6 first, then Monaco, then CM5
+                        const selectors = ['.cm-editor', '.monaco-editor', '.CodeMirror'];
                         let bestEditor = null;
                         let maxHeight = 0;
 
-                        for (const editor of cmEditors) {
-                            const rect = editor.getBoundingClientRect();
-                            const style = window.getComputedStyle(editor);
-                            if (rect.width > 100 && rect.height > 100 &&
-                                style.display !== 'none' &&
-                                style.visibility !== 'hidden') {
-                                // The CODE editor is the tallest one
-                                if (rect.height > maxHeight) {
-                                    maxHeight = rect.height;
-                                    bestEditor = editor;
+                        for (const sel of selectors) {
+                            const editors = document.querySelectorAll(sel);
+                            for (const editor of editors) {
+                                const rect = editor.getBoundingClientRect();
+                                const style = window.getComputedStyle(editor);
+                                if (rect.width > 100 && rect.height > 100 &&
+                                    style.display !== 'none' &&
+                                    style.visibility !== 'hidden') {
+                                    // The CODE editor is the tallest one
+                                    if (rect.height > maxHeight) {
+                                        maxHeight = rect.height;
+                                        bestEditor = editor;
+                                    }
                                 }
                             }
                         }
@@ -1389,13 +1401,24 @@ class PipedreamSyncer:
         return result
 
     async def sync_all(self, base_path: Path, workflow_keys: Optional[list[str]] = None) -> list[WorkflowResult]:
-        """Sync all (or specified) workflows with interactive login."""
+        """Sync all (or specified) workflows with interactive login.
+
+        In dry-run mode the browser is never launched — config/script
+        validation runs entirely in-process and the method returns
+        immediately without waiting for any network or UI interaction.
+        """
         keys_to_sync = workflow_keys or list(self.config.workflows.keys())
 
         print(f"\nSyncing {len(keys_to_sync)} workflow(s)...")
         if self.dry_run:
             print("[DRY RUN - No changes will be made]\n")
+            # Dry-run: validate and enumerate without launching any browser.
+            for key in keys_to_sync:
+                result = await self.sync_workflow(key, base_path)
+                self.results.append(result)
+            return self.results
 
+        # --- Live run: browser required ---
         try:
             await self.setup_browser_interactive()
 

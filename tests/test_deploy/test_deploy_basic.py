@@ -429,3 +429,35 @@ class TestDryRunBehavior:
         """Test dry_run flag defaults to False."""
         syncer = PipedreamSyncer(config=mock_config)
         assert syncer.dry_run is False
+
+    @pytest.mark.asyncio
+    async def test_dry_run_does_not_launch_browser(self, mock_config, tmp_path):
+        """Dry-run sync_all must NOT call setup_browser_interactive (Fix #2).
+
+        Before this fix, sync_all() launched a real browser even for dry-run,
+        causing the process to hang waiting for interactive Google SSO.
+        """
+        syncer = PipedreamSyncer(config=mock_config, dry_run=True)
+
+        browser_launched = []
+
+        async def fake_setup():
+            browser_launched.append(True)
+
+        syncer.setup_browser_interactive = fake_setup
+
+        # We need a valid script path for sync_workflow to work in dry-run mode.
+        # Patch validate_config to skip file checks, or supply a real temp script.
+        script_file = tmp_path / "test.py"
+        script_file.write_text("def handler(pd):\n    return {}\n")
+
+        # Point the step at our temp script
+        mock_config.workflows["test_workflow"].steps[0].script_path = str(script_file)
+
+        results = await syncer.sync_all(base_path=tmp_path)
+
+        # Browser must NOT have been launched
+        assert browser_launched == [], "setup_browser_interactive was called in dry-run mode"
+        # Results should have skipped status
+        assert len(results) == 1
+        assert results[0].status == "skipped"
