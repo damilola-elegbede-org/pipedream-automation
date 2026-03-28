@@ -4,6 +4,8 @@ import pytest
 
 from src.deploy.selectors import (
     CODE_EDITOR,
+    CODEMIRROR6_EDITOR,
+    CODEMIRROR6_CONTENT,
     DEPLOY_BUTTON,
     LOGGED_IN_INDICATOR,
     LOGIN_BUTTON,
@@ -196,9 +198,24 @@ class TestSelectorConstants:
         """Test Monaco editor selector is defined."""
         assert ".monaco-editor" in MONACO_EDITOR
 
-    def test_code_editor_selector(self):
-        """Test CODE_EDITOR includes Monaco."""
+    def test_code_editor_includes_cm6(self):
+        """Test CODE_EDITOR includes CodeMirror 6 selector (current Pipedream editor)."""
+        assert ".cm-editor" in CODE_EDITOR
+
+    def test_code_editor_includes_monaco(self):
+        """Test CODE_EDITOR includes Monaco selector as fallback."""
         assert "monaco-editor" in CODE_EDITOR.lower() or ".monaco" in CODE_EDITOR
+
+    def test_code_editor_cm6_before_monaco(self):
+        """Test CM6 is listed before Monaco in CODE_EDITOR (priority order)."""
+        cm6_pos = CODE_EDITOR.index(".cm-editor")
+        monaco_pos = CODE_EDITOR.index(".monaco-editor")
+        assert cm6_pos < monaco_pos, "CM6 selector should come before Monaco in CODE_EDITOR"
+
+    def test_codemirror6_constants_defined(self):
+        """Test CM6 specific constants are defined and non-empty."""
+        assert CODEMIRROR6_EDITOR == ".cm-editor"
+        assert CODEMIRROR6_CONTENT == ".cm-content"
 
     def test_deploy_button_selector(self):
         """Test DEPLOY_BUTTON selector includes text match."""
@@ -213,7 +230,22 @@ class TestSelectorConstants:
         assert LOGIN_BUTTON is not None
         assert len(LOGIN_BUTTON) > 0
 
+    def test_logged_in_indicator_no_playwright_combinator(self):
+        """LOGGED_IN_INDICATOR must not use >> combinator (invalid in CSS selector strings)."""
+        assert ">>" not in LOGGED_IN_INDICATOR, (
+            "LOGGED_IN_INDICATOR uses >> which is not valid in CSS selector strings "
+            "passed to page.wait_for_selector(); use :has-text() or plain CSS instead"
+        )
+
     def test_logged_in_indicator_selector(self):
-        """Test LOGGED_IN_INDICATOR selector is defined."""
+        """Test LOGGED_IN_INDICATOR selector is defined and non-empty."""
         assert LOGGED_IN_INDICATOR is not None
         assert len(LOGGED_IN_INDICATOR) > 0
+
+    def test_step_by_name_no_playwright_combinator(self):
+        """step_by_name must not use >> combinator (invalid in CSS selector strings)."""
+        selector = step_by_name("test_step")
+        assert ">>" not in selector, (
+            "step_by_name output uses >> which is not valid in CSS selector strings; "
+            "use :has-text() or plain CSS instead"
+        )

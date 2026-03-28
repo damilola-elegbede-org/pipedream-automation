@@ -109,6 +109,89 @@ class TestLoadAndSetEnvLocal:
         result = load_and_set_env_local(env_file)
         assert result == {"KEY": "value"}
 
+    # ------------------------------------------------------------------
+    # Fallback / canonical path tests
+    # ------------------------------------------------------------------
+
+    def test_fallback_canonical_fills_missing_vars(self, tmp_path, monkeypatch):
+        """Canonical path fills vars absent from repo .env.local."""
+        import src.deploy.utils as utils_mod
+
+        repo_env = tmp_path / ".env.local"
+        canonical_env = tmp_path / "canonical.env.local"
+
+        repo_env.write_text("REPO_ONLY=repo_val\n")
+        canonical_env.write_text("CANONICAL_ONLY=canonical_val\n")
+
+        # Patch module-level paths so the test is hermetic
+        monkeypatch.setattr(utils_mod, "ENV_LOCAL_PATH", repo_env)
+        monkeypatch.setattr(utils_mod, "CANONICAL_ENV_PATH", canonical_env)
+        monkeypatch.delenv("REPO_ONLY", raising=False)
+        monkeypatch.delenv("CANONICAL_ONLY", raising=False)
+
+        result = utils_mod.load_and_set_env_local()
+
+        assert os.environ.get("REPO_ONLY") == "repo_val"
+        assert os.environ.get("CANONICAL_ONLY") == "canonical_val"
+        assert "REPO_ONLY" in result
+        assert "CANONICAL_ONLY" in result
+
+    def test_repo_env_takes_precedence_over_canonical(self, tmp_path, monkeypatch):
+        """Repo .env.local value wins over canonical when key exists in both."""
+        import src.deploy.utils as utils_mod
+
+        repo_env = tmp_path / ".env.local"
+        canonical_env = tmp_path / "canonical.env.local"
+
+        repo_env.write_text("SHARED_KEY=from_repo\n")
+        canonical_env.write_text("SHARED_KEY=from_canonical\n")
+
+        monkeypatch.setattr(utils_mod, "ENV_LOCAL_PATH", repo_env)
+        monkeypatch.setattr(utils_mod, "CANONICAL_ENV_PATH", canonical_env)
+        monkeypatch.delenv("SHARED_KEY", raising=False)
+
+        utils_mod.load_and_set_env_local()
+
+        assert os.environ.get("SHARED_KEY") == "from_repo"
+
+    def test_canonical_used_when_repo_env_missing(self, tmp_path, monkeypatch):
+        """Falls back to canonical when CWD .env.local does not exist."""
+        import src.deploy.utils as utils_mod
+
+        canonical_env = tmp_path / "canonical.env.local"
+        canonical_env.write_text("FALLBACK_VAR=fallback_val\n")
+
+        # Point repo env at a non-existent file
+        monkeypatch.setattr(utils_mod, "ENV_LOCAL_PATH", tmp_path / "missing.env.local")
+        monkeypatch.setattr(utils_mod, "CANONICAL_ENV_PATH", canonical_env)
+        monkeypatch.delenv("FALLBACK_VAR", raising=False)
+
+        result = utils_mod.load_and_set_env_local()
+
+        assert os.environ.get("FALLBACK_VAR") == "fallback_val"
+        assert "FALLBACK_VAR" in result
+
+    def test_explicit_path_skips_fallback(self, tmp_path, monkeypatch):
+        """When an explicit env_path is passed, canonical fallback is skipped."""
+        import src.deploy.utils as utils_mod
+
+        explicit_env = tmp_path / "explicit.env.local"
+        canonical_env = tmp_path / "canonical.env.local"
+
+        explicit_env.write_text("EXPLICIT_KEY=explicit_val\n")
+        canonical_env.write_text("CANONICAL_KEY=should_not_load\n")
+
+        monkeypatch.setattr(utils_mod, "CANONICAL_ENV_PATH", canonical_env)
+        monkeypatch.delenv("EXPLICIT_KEY", raising=False)
+        monkeypatch.delenv("CANONICAL_KEY", raising=False)
+
+        result = utils_mod.load_and_set_env_local(explicit_env)
+
+        assert os.environ.get("EXPLICIT_KEY") == "explicit_val"
+        assert os.environ.get("CANONICAL_KEY") is None
+        assert "EXPLICIT_KEY" in result
+        assert "CANONICAL_KEY" not in result
+
 
 class TestEncodeCookiesBase64:
     """Tests for encode_cookies_base64 function."""

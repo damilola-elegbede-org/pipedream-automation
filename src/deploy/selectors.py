@@ -44,15 +44,17 @@ def validate_workflow_id(workflow_id: str) -> str:
 LOGIN_FORM = "form[action*='login'], .login-form"
 LOGIN_BUTTON = "button[type='submit'], button:has-text('Log in'), button:has-text('Sign in')"
 USER_MENU = "[data-testid='user-menu'], .user-avatar, .user-dropdown"
-LOGGED_IN_INDICATOR = "[data-testid='user-menu'], .user-avatar, nav >> text=Workflows"
+# Note: avoid Playwright `>>` combinator in CSS strings passed to wait_for_selector;
+# use plain CSS or :has-text() pseudo-class instead.
+LOGGED_IN_INDICATOR = "[data-testid='user-menu'], .user-avatar, a[href*='/workflows']"
 
 # =============================================================================
 # Navigation Selectors
 # =============================================================================
 
 # Top-level navigation
-NAV_WORKFLOWS = "a[href*='/workflows'], nav >> text=Workflows"
-NAV_PROJECTS = "a[href*='/projects'], nav >> text=Projects"
+NAV_WORKFLOWS = "a[href*='/workflows']"
+NAV_PROJECTS = "a[href*='/projects']"
 
 # Workflow list
 WORKFLOW_LIST = "[data-testid='workflow-list'], .workflow-list, .workflows-container"
@@ -73,13 +75,20 @@ STEP_HEADER = "[data-testid='step-header'], .step-header, .step-title"
 
 def step_by_name(name: str) -> str:
     """
-    Generate selector for a step by its name.
+    Generate a CSS/Playwright selector for a workflow step card by its name.
 
-    Pipedream displays step names in the workflow canvas. This selector
-    finds a step container that contains the specified name.
+    Pipedream renders step names as text inside card-like ``<div>`` elements
+    on the workflow canvas.  The returned selector is a *comma-separated list*
+    of candidates tried left-to-right by Playwright's ``wait_for_selector`` /
+    ``locator``.
 
-    Updated December 2024: Pipedream's DOM structure uses div containers
-    with step names displayed as text. We use text-based selectors as primary.
+    **Important:** Playwright's ``>>`` combinator is **NOT** valid inside a
+    CSS selector string passed to ``page.wait_for_selector()``.  This
+    function only uses standard CSS4 + Playwright's ``:has-text()``
+    pseudo-class.
+
+    Updated 2026-03: prioritise data attributes and :has-text() over raw
+    ``div:has-text()`` which can match far too broadly.
 
     Raises:
         ValidationError: If step name contains invalid characters
@@ -87,23 +96,25 @@ def step_by_name(name: str) -> str:
     # Validate step name format first
     validate_step_name(name)
 
-    # Escape special characters for selector syntax
     # Escape single quotes for :has-text() selectors
     escaped_single = name.replace("'", "\\'")
     # Escape double quotes for CSS attribute selectors
     escaped_double = name.replace('"', '\\"')
 
-    # Primary: Use text selector which reliably finds step names in the UI
-    # Secondary: Try data attributes and class names (fallback)
+    # Build selector list — ordered from most specific to most general.
+    # Avoid Playwright ``>>`` combinator here; callers that need chaining
+    # should use ``page.locator(step_by_name(name))`` and chain from there.
     return (
-        # Text-based selectors (most reliable for current Pipedream UI)
-        f"div:has-text('{escaped_single}') >> nth=0, "
-        # Data attribute selectors (if Pipedream adds them)
+        # 1. Data attribute (best — if Pipedream ever adds this)
         f'[data-step-name="{escaped_double}"], '
+        # 2. data-testid with text guard
         f"[data-testid='step']:has-text('{escaped_single}'), "
-        # Class-based selectors (legacy)
+        # 3. Semantic class names with text guard
         f".step-container:has-text('{escaped_single}'), "
-        f".workflow-step:has-text('{escaped_single}')"
+        f".workflow-step:has-text('{escaped_single}'), "
+        # 4. Generic node/card class patterns used by common workflow editors
+        f"[class*='node']:has-text('{escaped_single}'), "
+        f"[class*='card']:has-text('{escaped_single}')"
     )
 
 
@@ -129,21 +140,29 @@ TAB_TEST = "[data-testid='tab-test'], button:has-text('Test'), .tab-test"
 # Code Editor Selectors (Monaco/CodeMirror)
 # =============================================================================
 
-# Monaco editor (Pipedream uses Monaco)
+# Monaco editor (used by some Pipedream step types)
 MONACO_EDITOR = ".monaco-editor"
 MONACO_TEXTAREA = ".monaco-editor textarea.inputarea"
 MONACO_LINES = ".monaco-editor .view-lines"
 MONACO_LINE = ".monaco-editor .view-line"
 
-# CodeMirror (fallback if Pipedream switches)
+# CodeMirror 5 (legacy — unlikely in current Pipedream but kept for safety)
 CODEMIRROR_EDITOR = ".CodeMirror"
 CODEMIRROR_TEXTAREA = ".CodeMirror textarea"
 CODEMIRROR_LINES = ".CodeMirror-code"
 
-# Generic code editor (tries both)
-CODE_EDITOR = f"{MONACO_EDITOR}, {CODEMIRROR_EDITOR}"
-CODE_TEXTAREA = f"{MONACO_TEXTAREA}, {CODEMIRROR_TEXTAREA}"
-CODE_CONTENT = f"{MONACO_LINES}, {CODEMIRROR_LINES}"
+# CodeMirror 6 — Pipedream's Python step editor as of 2025
+# .cm-editor  → outer wrapper element
+# .cm-content → the editable content div (contenteditable)
+# .cm-scroller → scroll container (useful for scroll_into_view_if_needed)
+CODEMIRROR6_EDITOR = ".cm-editor"
+CODEMIRROR6_CONTENT = ".cm-content"
+CODEMIRROR6_SCROLLER = ".cm-scroller"
+
+# Generic code editor — CM6 first (current Pipedream Python editor), then Monaco, then CM5
+CODE_EDITOR = f"{CODEMIRROR6_EDITOR}, {MONACO_EDITOR}, {CODEMIRROR_EDITOR}"
+CODE_TEXTAREA = f"{CODEMIRROR6_CONTENT}, {MONACO_TEXTAREA}, {CODEMIRROR_TEXTAREA}"
+CODE_CONTENT = f"{CODEMIRROR6_CONTENT}, {MONACO_LINES}, {CODEMIRROR_LINES}"
 
 # =============================================================================
 # Save/Status Indicators
@@ -151,13 +170,17 @@ CODE_CONTENT = f"{MONACO_LINES}, {CODEMIRROR_LINES}"
 
 # Autosave status
 SAVE_STATUS = "[data-testid='save-status'], .save-status, .save-indicator"
-SAVING_INDICATOR = "[data-status='saving'], .saving, :has-text('Saving...')"
-SAVED_INDICATOR = "[data-status='saved'], .saved, :has-text('Saved')"
+# :has-text() is Playwright pseudo-class (valid in page.wait_for_selector).
+# Using both data attributes and text fallbacks for resilience.
+SAVING_INDICATOR = "[data-status='saving'], .saving, [class*='saving']"
+SAVED_INDICATOR = "[data-status='saved'], .saved, [class*='saved']"
 SAVE_ERROR = "[data-status='error'], .save-error, .error-indicator"
 
 # Deployment status
-DEPLOY_BUTTON = "button:has-text('Deploy'), [data-testid='deploy-button']"
-DEPLOYED_INDICATOR = ":has-text('Deployed'), .deployed-badge"
+# Note: Pipedream's Deploy button may render as a <button> or a styled <div>.
+# The text-based selector is the most resilient; keep the data-testid as primary.
+DEPLOY_BUTTON = "[data-testid='deploy-button'], button:has-text('Deploy')"
+DEPLOYED_INDICATOR = "[class*='deployed'], .deployed-badge"
 
 # =============================================================================
 # Error and Alert Selectors
