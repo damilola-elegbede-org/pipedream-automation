@@ -56,13 +56,31 @@ def load_and_set_env_local(env_path: Optional[Path] = None) -> dict[str, str]:
     """
     Load .env.local and set as environment variables.
 
+    Priority order:
+    1. env_path parameter (if provided)
+    2. ./env.local (repo root, for dev)
+    3. ~/.openclaw-dara/credentials/pipedream/.env.local (canonical)
+
     Args:
-        env_path: Path to env file (defaults to .env.local)
+        env_path: Path to env file (defaults to .env.local, with canonical fallback)
 
     Returns:
         Dictionary of loaded environment variables
     """
-    env_vars = load_env_local(env_path)
+    # Determine path to load from
+    if env_path:
+        path = env_path
+    else:
+        # Try repo .env.local first
+        path = Path(".env.local")
+        
+        # If repo .env.local doesn't exist or is incomplete, try canonical path
+        if not path.exists():
+            canonical_env = Path.home() / ".openclaw-dara/credentials/pipedream/.env.local"
+            if canonical_env.exists():
+                path = canonical_env
+    
+    env_vars = load_env_local(path)
     for key, value in env_vars.items():
         if key not in os.environ:  # Don't override existing env vars
             os.environ[key] = value

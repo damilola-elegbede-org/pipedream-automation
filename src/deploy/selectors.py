@@ -135,15 +135,16 @@ MONACO_TEXTAREA = ".monaco-editor textarea.inputarea"
 MONACO_LINES = ".monaco-editor .view-lines"
 MONACO_LINE = ".monaco-editor .view-line"
 
-# CodeMirror (fallback if Pipedream switches)
-CODEMIRROR_EDITOR = ".CodeMirror"
+# CodeMirror (legacy and CM6)
+CODEMIRROR_EDITOR = ".CodeMirror, .cm-editor"
 CODEMIRROR_TEXTAREA = ".CodeMirror textarea"
 CODEMIRROR_LINES = ".CodeMirror-code"
+CODEMIRROR6_CONTENT = ".cm-content"  # CodeMirror 6 content area
 
-# Generic code editor (tries both)
+# Generic code editor (tries both Monaco and CodeMirror, including CM6)
 CODE_EDITOR = f"{MONACO_EDITOR}, {CODEMIRROR_EDITOR}"
 CODE_TEXTAREA = f"{MONACO_TEXTAREA}, {CODEMIRROR_TEXTAREA}"
-CODE_CONTENT = f"{MONACO_LINES}, {CODEMIRROR_LINES}"
+CODE_CONTENT = f"{MONACO_LINES}, {CODEMIRROR_LINES}, {CODEMIRROR6_CONTENT}"
 
 # =============================================================================
 # Save/Status Indicators

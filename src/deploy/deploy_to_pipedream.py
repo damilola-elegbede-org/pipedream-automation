@@ -228,6 +228,18 @@ class PipedreamSyncer:
         if not self.page:
             return False
 
+        # IMPORTANT: Inject cached cookies BEFORE first navigation to avoid SSO redirect loop
+        try:
+            cached_cookies = get_cached_cookies()
+            if cached_cookies:
+                self.log("Injecting cached Pipedream cookies into context...", "debug")
+                await self.context.add_cookies(cached_cookies)
+                self.log("Cookies injected successfully", "debug")
+            else:
+                self.log("No cached cookies found, will require interactive login", "debug")
+        except Exception as e:
+            self.log(f"Failed to inject cookies: {e}", "warn")
+
         # First, check if already logged in by navigating to the base URL
         self.log("Checking login status...")
         await self.page.goto(self.config.pipedream_base_url, wait_until="networkidle")
