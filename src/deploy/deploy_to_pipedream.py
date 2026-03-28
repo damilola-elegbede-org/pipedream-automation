@@ -1332,10 +1332,45 @@ class PipedreamSyncer:
                 duration_seconds=time.time() - start_time,
             )
 
+    async def _dry_run_workflow(self, workflow_key: str, base_path: Path) -> WorkflowResult:
+        """
+        Return a skipped WorkflowResult for dry-run mode — no browser interaction.
+
+        Enumerates every step from config and marks them all as skipped with
+        message "Dry run".  Called by sync_workflow and sync_all in dry-run mode
+        to make the dry-run path explicit and separately testable.
+
+        Args:
+            workflow_key: Key identifying the workflow in config.
+            base_path: Base path used to resolve script paths (not accessed here).
+
+        Returns:
+            WorkflowResult with status "skipped" and one StepResult per step.
+        """
+        workflow = self.config.get_workflow(workflow_key)
+        result = WorkflowResult(
+            workflow_key=workflow_key,
+            workflow_id=workflow.id,
+            workflow_name=workflow.name,
+            status="skipped",
+        )
+        for step in workflow.steps:
+            self.log(f"    [dry-run] {step.step_name} <- {step.script_path}")
+            result.steps.append(StepResult(
+                step_name=step.step_name,
+                script_path=step.script_path,
+                status="skipped",
+                message="Dry run",
+            ))
+        return result
+
     async def sync_workflow(self, workflow_key: str, base_path: Path) -> WorkflowResult:
         """Sync all steps in a workflow."""
         workflow = self.config.get_workflow(workflow_key)
         self.log(f"  [{workflow_key}] {workflow.name}")
+
+        if self.dry_run:
+            return await self._dry_run_workflow(workflow_key, base_path)
 
         result = WorkflowResult(
             workflow_key=workflow_key,
@@ -1343,18 +1378,6 @@ class PipedreamSyncer:
             workflow_name=workflow.name,
             status="success",
         )
-
-        if self.dry_run:
-            for step in workflow.steps:
-                self.log(f"    [dry-run] {step.step_name} <- {step.script_path}")
-                result.steps.append(StepResult(
-                    step_name=step.step_name,
-                    script_path=step.script_path,
-                    status="skipped",
-                    message="Dry run",
-                ))
-            result.status = "skipped"
-            return result
 
         try:
             await self.navigate_to_workflow(workflow.id)
@@ -1410,8 +1433,9 @@ class PipedreamSyncer:
             # In dry-run mode, skip browser setup entirely — just validate and enumerate.
             # Previously this caused a hang because setup_browser_interactive() launches
             # a headed browser and wait_for_login() blocks for up to 5 minutes.
+            # Call _dry_run_workflow directly so no browser paths are reachable.
             for key in keys_to_sync:
-                result = await self.sync_workflow(key, base_path)
+                result = await self._dry_run_workflow(key, base_path)
                 self.results.append(result)
             return self.results
 
