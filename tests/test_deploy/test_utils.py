@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+import stat
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,7 @@ import pytest
 
 from src.deploy.exceptions import AuthenticationError
 from src.deploy.utils import (
+    _validate_credential_file_security,
     check_pipedream_api_support,
     encode_cookies_base64,
     ensure_screenshot_dir,
@@ -108,6 +110,177 @@ class TestLoadAndSetEnvLocal:
 
         result = load_and_set_env_local(env_file)
         assert result == {"KEY": "value"}
+
+    def test_merges_canonical_and_repo_env(self, tmp_path, monkeypatch):
+        """Test that canonical .env.local is merged with repo .env.local.
+
+        Repo .env.local should overlay canonical (repo values win for same keys).
+        This ensures workflow IDs from canonical are available even when repo
+        .env.local only contains PIPEDREAM_COOKIES.
+        """
+        canonical_dir = tmp_path / ".openclaw-dara" / "credentials" / "pipedream"
+        canonical_dir.mkdir(parents=True)
+        canonical_env = canonical_dir / ".env.local"
+        canonical_env.write_text(
+            "WORKFLOW_ID=canonical_workflow\nCOMMON_KEY=from_canonical\n"
+        )
+        # Security requirement: credential file must be 0o600
+        canonical_env.chmod(0o600)
+
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        repo_env = repo_dir / ".env.local"
+        repo_env.write_text("PIPEDREAM_COOKIES=abc123\nCOMMON_KEY=from_repo\n")
+
+        # Patch Path.home() to point to our tmp_path
+        monkeypatch.setattr("src.deploy.utils.Path.home", lambda: tmp_path)
+        # Patch CWD so repo .env.local is found
+        monkeypatch.chdir(repo_dir)
+        monkeypatch.delenv("WORKFLOW_ID", raising=False)
+        monkeypatch.delenv("COMMON_KEY", raising=False)
+        monkeypatch.delenv("PIPEDREAM_COOKIES", raising=False)
+
+        result = load_and_set_env_local()
+
+        # Canonical key present
+        assert result.get("WORKFLOW_ID") == "canonical_workflow"
+        # Repo-only key present
+        assert result.get("PIPEDREAM_COOKIES") == "abc123"
+        # Repo overrides canonical for same key
+        assert result.get("COMMON_KEY") == "from_repo"
+
+    def test_canonical_fallback_when_no_repo_env(self, tmp_path, monkeypatch):
+        """Test that canonical .env.local is used when repo .env.local is absent."""
+        canonical_dir = tmp_path / ".openclaw-dara" / "credentials" / "pipedream"
+        canonical_dir.mkdir(parents=True)
+        canonical_env = canonical_dir / ".env.local"
+        canonical_env.write_text("CANONICAL_ONLY=yes\n")
+        # Security requirement: credential file must be 0o600
+        canonical_env.chmod(0o600)
+
+        empty_dir = tmp_path / "empty_repo"
+        empty_dir.mkdir()
+        # No .env.local in empty_dir
+
+        monkeypatch.setattr("src.deploy.utils.Path.home", lambda: tmp_path)
+        monkeypatch.chdir(empty_dir)
+        monkeypatch.delenv("CANONICAL_ONLY", raising=False)
+
+        result = load_and_set_env_local()
+
+        assert result.get("CANONICAL_ONLY") == "yes"
+        assert os.environ.get("CANONICAL_ONLY") == "yes"
+
+
+class TestValidateCredentialFileSecurity:
+    """Tests for _validate_credential_file_security function."""
+
+    def test_accepts_valid_file(self, tmp_path):
+        """Test that a properly secured file passes validation."""
+        cred_file = tmp_path / ".env.local"
+        cred_file.write_text("KEY=value\n")
+        cred_file.chmod(0o600)
+
+        # Should not raise
+        _validate_credential_file_security(cred_file)
+
+    def test_accepts_stricter_permissions(self, tmp_path):
+        """Test that 0o400 (read-only by owner) also passes validation."""
+        cred_file = tmp_path / ".env.local"
+        cred_file.write_text("KEY=value\n")
+        cred_file.chmod(0o400)
+
+        # 0o400 is stricter than 0o600 — should also pass
+        _validate_credential_file_security(cred_file)
+
+    def test_rejects_group_readable_file(self, tmp_path):
+        """Test that a group-readable file is rejected."""
+        cred_file = tmp_path / ".env.local"
+        cred_file.write_text("KEY=value\n")
+        cred_file.chmod(0o640)  # group read set
+
+        with pytest.raises(PermissionError, match="unsafe permissions"):
+            _validate_credential_file_security(cred_file)
+
+    def test_rejects_world_readable_file(self, tmp_path):
+        """Test that a world-readable file is rejected."""
+        cred_file = tmp_path / ".env.local"
+        cred_file.write_text("KEY=value\n")
+        cred_file.chmod(0o644)  # world read set
+
+        with pytest.raises(PermissionError, match="unsafe permissions"):
+            _validate_credential_file_security(cred_file)
+
+    def test_rejects_world_writable_parent_dir(self, tmp_path):
+        """Test that a world-writable parent directory is rejected."""
+        cred_file = tmp_path / ".env.local"
+        cred_file.write_text("KEY=value\n")
+        cred_file.chmod(0o600)
+        tmp_path.chmod(0o777)  # world-writable parent
+
+        try:
+            with pytest.raises(PermissionError, match="world-writable"):
+                _validate_credential_file_security(cred_file)
+        finally:
+            # Restore so pytest can clean up tmp_path
+            tmp_path.chmod(0o700)
+
+    def test_rejects_wrong_owner(self, tmp_path, monkeypatch):
+        """Test that a file owned by a different UID is rejected."""
+        cred_file = tmp_path / ".env.local"
+        cred_file.write_text("KEY=value\n")
+        cred_file.chmod(0o600)
+
+        # Patch os.getuid to return a different UID than the file owner
+        real_uid = os.stat(cred_file).st_uid
+        fake_uid = real_uid + 1
+        monkeypatch.setattr("os.getuid", lambda: fake_uid)
+
+        with pytest.raises(PermissionError, match="owned by UID"):
+            _validate_credential_file_security(cred_file)
+
+    def test_error_message_includes_chmod_hint_for_perms(self, tmp_path):
+        """Test that PermissionError for bad permissions includes a chmod hint."""
+        cred_file = tmp_path / ".env.local"
+        cred_file.write_text("KEY=value\n")
+        cred_file.chmod(0o644)
+
+        with pytest.raises(PermissionError) as exc_info:
+            _validate_credential_file_security(cred_file)
+
+        assert "chmod 600" in str(exc_info.value)
+
+    def test_load_and_set_env_local_rejects_bad_permissions(self, tmp_path, monkeypatch):
+        """Test that load_and_set_env_local raises when canonical file has bad permissions."""
+        canonical_dir = tmp_path / ".openclaw-dara" / "credentials" / "pipedream"
+        canonical_dir.mkdir(parents=True)
+        canonical_env = canonical_dir / ".env.local"
+        canonical_env.write_text("SECRET=value\n")
+        canonical_env.chmod(0o644)  # Intentionally insecure
+
+        monkeypatch.setattr("src.deploy.utils.Path.home", lambda: tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(PermissionError):
+            load_and_set_env_local()
+
+    def test_load_and_set_env_local_rejects_world_writable_parent(self, tmp_path, monkeypatch):
+        """Test that load_and_set_env_local raises when canonical parent dir is world-writable."""
+        canonical_dir = tmp_path / ".openclaw-dara" / "credentials" / "pipedream"
+        canonical_dir.mkdir(parents=True)
+        canonical_env = canonical_dir / ".env.local"
+        canonical_env.write_text("SECRET=value\n")
+        canonical_env.chmod(0o600)
+        canonical_dir.chmod(0o777)  # world-writable parent
+
+        monkeypatch.setattr("src.deploy.utils.Path.home", lambda: tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        try:
+            with pytest.raises(PermissionError, match="world-writable"):
+                load_and_set_env_local()
+        finally:
+            canonical_dir.chmod(0o700)
 
 
 class TestEncodeCookiesBase64:

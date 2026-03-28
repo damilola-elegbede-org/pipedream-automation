@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Optional
@@ -52,6 +53,49 @@ def load_env_local(env_path: Optional[Path] = None) -> dict[str, str]:
     return env_vars
 
 
+def _validate_credential_file_security(path: Path) -> None:
+    """
+    Validate that a credential file is safe to load.
+
+    Checks:
+    1. File ownership matches the current process UID.
+    2. File permissions are 0o600 or stricter (no group/world read).
+    3. Parent directory is not world-writable.
+
+    Raises:
+        PermissionError: If any security check fails. This is a hard error —
+                         no fallback, no silent skip.
+    """
+    file_stat = os.stat(path)
+    parent_stat = os.stat(path.parent)
+
+    # 1. File must be owned by the current process user
+    if file_stat.st_uid != os.getuid():
+        raise PermissionError(
+            f"Credential file {path} is owned by UID {file_stat.st_uid}, "
+            f"but the current process UID is {os.getuid()}. "
+            "Refusing to load — possible credential injection attack."
+        )
+
+    # 2. File must not be group-readable or world-readable (require 0o600 or stricter)
+    if file_stat.st_mode & (stat.S_IRGRP | stat.S_IROTH):
+        octal_mode = oct(stat.S_IMODE(file_stat.st_mode))
+        raise PermissionError(
+            f"Credential file {path} has unsafe permissions {octal_mode}. "
+            "Expected 0o600 or stricter (no group/world read). "
+            f"Fix with: chmod 600 {path}"
+        )
+
+    # 3. Parent directory must not be world-writable
+    if parent_stat.st_mode & stat.S_IWOTH:
+        octal_mode = oct(stat.S_IMODE(parent_stat.st_mode))
+        raise PermissionError(
+            f"Parent directory {path.parent} is world-writable (permissions {octal_mode}). "
+            "Refusing to load credential file — directory is unsafe. "
+            f"Fix with: chmod o-w {path.parent}"
+        )
+
+
 def load_and_set_env_local(env_path: Optional[Path] = None) -> dict[str, str]:
     """
     Load .env.local and set as environment variables.
@@ -80,6 +124,7 @@ def load_and_set_env_local(env_path: Optional[Path] = None) -> dict[str, str]:
         # Auto-discovery: load canonical first (base), then repo .env.local (overlay)
         canonical_env = Path.home() / ".openclaw-dara/credentials/pipedream/.env.local"
         if canonical_env.exists():
+            _validate_credential_file_security(canonical_env)
             canonical_vars = load_env_local(canonical_env)
             merged_vars.update(canonical_vars)
 

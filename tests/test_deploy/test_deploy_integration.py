@@ -382,22 +382,28 @@ class TestDeployWorkflowErrors:
 
     @pytest.mark.asyncio
     async def test_deploy_workflow_with_pending_changes(self, mock_config):
-        """Test deploy_workflow when there are pending changes."""
+        """Test deploy_workflow returns False after timeout when deploy stays pending."""
         syncer = PipedreamSyncer(config=mock_config, verbose=True)
-        
+
         mock_button = AsyncMock()
         mock_button.click = AsyncMock()
-        
+
         mock_page = AsyncMock()
-        mock_page.wait_for_selector = AsyncMock(return_value=mock_button)
-        # evaluate returns true, indicating DEPLOY PENDING exists (no changes yet)
+        # get_by_text("Deploy").first — simulate text locator returning a clickable button
+        mock_text_locator = AsyncMock()
+        mock_text_locator.count = AsyncMock(return_value=1)
+        mock_text_locator.click = AsyncMock()
+        mock_page.get_by_text = MagicMock(return_value=mock_text_locator)
+
+        # simulate deploy staying PENDING forever (evaluate always returns True)
         mock_page.evaluate = AsyncMock(return_value=True)
-        
+        mock_page.wait_for_selector = AsyncMock(side_effect=PlaywrightTimeout("no Deploying"))
+        mock_page.goto = AsyncMock()
+
         syncer.page = mock_page
-        
-        # Should handle gracefully
-        result = await syncer.deploy_workflow("Test Workflow")
-        # Behavior depends on implementation
+        # Use a very short timeout so the test completes quickly
+        result = await syncer._wait_for_deploy_completion("Test Workflow", timeout=1)
+        assert result is False
 
 
 class TestVerifyCodeUpdateErrors:
