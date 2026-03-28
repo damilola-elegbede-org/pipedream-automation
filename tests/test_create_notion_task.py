@@ -153,8 +153,8 @@ class TestBuildPageContentBlocks:
 
     def test_urgency_affects_callout_emoji(self):
         """High urgency should show red emoji, low should show green."""
-        high_analysis = {"summary": "Urgent!", "urgency": "high", "action_items": [], "key_dates": [], "important_links": [], "key_contacts": [], "category": "request"}
-        low_analysis = {"summary": "Not urgent", "urgency": "low", "action_items": [], "key_dates": [], "important_links": [], "key_contacts": [], "category": "info"}
+        high_analysis = {"summary": "Urgent!", "urgency": "high", "action_items": [], "key_dates": [], "important_links": [], "key_contacts": [], "category": "request"}  # noqa: E501
+        low_analysis = {"summary": "Not urgent", "urgency": "low", "action_items": [], "key_dates": [], "important_links": [], "key_contacts": [], "category": "info"}  # noqa: E501
 
         high_blocks = build_page_content_blocks("", high_analysis)
         low_blocks = build_page_content_blocks("", low_analysis)
@@ -229,7 +229,7 @@ class TestHandler:
     @patch('steps.create_notion_task.requests.post')
     @patch('steps.create_notion_task.requests.patch')
     @patch('steps.create_notion_task.time.sleep')
-    def test_creates_new_task_when_no_duplicate(self, mock_sleep, mock_patch, mock_post, mock_check, mock_pd, notion_auth, sample_email):
+    def test_creates_new_task_when_no_duplicate(self, mock_sleep, mock_patch, mock_post, mock_check, mock_pd, notion_auth, sample_email):  # noqa: E501
         """Verify new task creation when no duplicate exists."""
         mock_pd.inputs = notion_auth
         mock_pd.steps = {"fetch_gmail_emails": {"$return_value": [sample_email]}}

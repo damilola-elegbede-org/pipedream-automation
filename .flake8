@@ -1,0 +1,42 @@
+[flake8]
+# Max line length — matches black/isort config in pyproject.toml
+max-line-length = 120
+
+# Directories/files to exclude
+exclude =
+    .venv,
+    .git,
+    __pycache__,
+    .pytest_cache,
+    .tmp,
+    *.egg-info,
+    build,
+    dist,
+    htmlcov
+
+# Ignored rules and rationale:
+#
+# D1xx — Missing docstrings in modules/classes/methods:
+#   Test methods and Pipedream step handler functions (handler(pd)) don't
+#   benefit from per-method docstrings in this codebase. Module-level
+#   docstrings for __init__.py and test files are low-value noise.
+#
+# D2xx/D3xx/D4xx — Docstring formatting:
+#   Enforcing imperative mood, blank lines, and summary period punctuation
+#   across all existing docstrings would be a large churn with no functional
+#   benefit. Accepted as-is for existing code.
+#
+# E402 — Module level import not at top of file:
+#   Some test files must import sys.path modifications before importing the
+#   module under test. This is a known pattern in this repo.
+#
+# W391 — Blank line at end of file:
+#   Minor style; not enforced here (black handles this).
+#
+extend-ignore =
+    D1,
+    D2,
+    D3,
+    D4,
+    E402,
+    W391

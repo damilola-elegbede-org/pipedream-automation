@@ -1,7 +1,7 @@
 """
 Tests for google_to_notion.py Pipedream step.
 """
-import pytest
+import pytest  # noqa: F401
 import sys
 import os
 

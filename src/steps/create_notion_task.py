@@ -583,17 +583,17 @@ def build_page_content_blocks(plain_text_body, analysis):
     return children_blocks
 
 
-def handler(pd: "pipedream"):
+def handler(pd: "pipedream"):  # noqa: F821
     # --- 1. Get Notion and Anthropic API Credentials ---
     try:
         notion_token = pd.inputs["notion"]["$auth"]["oauth_access_token"]
     except KeyError:
-        raise Exception("Notion account not connected or input name is not 'notion'. Please connect Notion using OAuth.")
+        raise Exception("Notion account not connected or input name is not 'notion'. Please connect Notion using OAuth.")  # noqa: E501
 
     # Get Database ID from environment variable (required)
     database_id = os.environ.get("NOTION_DATABASE_ID")
     if not database_id:
-        raise Exception("NOTION_DATABASE_ID environment variable not set. Set it in Pipedream Settings > Environment Variables")
+        raise Exception("NOTION_DATABASE_ID environment variable not set. Set it in Pipedream Settings > Environment Variables")  # noqa: E501
 
     # Get Anthropic API key for Claude analysis
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -636,7 +636,7 @@ def handler(pd: "pipedream"):
 
     # --- 4. Loop Through Emails and Create Notion Items & Content ---
     for index, email_data in enumerate(emails_to_process):
-        print(f"\nProcessing email {index + 1}/{len(emails_to_process)} (Subject: {email_data.get('subject', 'N/A')})...")
+        print(f"\nProcessing email {index + 1}/{len(emails_to_process)} (Subject: {email_data.get('subject', 'N/A')})...")  # noqa: E501
 
         if not isinstance(email_data, dict) or "message_id" not in email_data:
             print(f"  Skipping item {index + 1}: Invalid format or missing 'message_id'.")
@@ -651,7 +651,7 @@ def handler(pd: "pipedream"):
         existing_task = check_existing_task(headers, database_id, gmail_message_id)
         if existing_task:
             existing_page_id = existing_task.get("id")
-            print(f"  Task already exists for message {gmail_message_id} (Page ID: {existing_page_id}). Skipping creation.")
+            print(f"  Task already exists for message {gmail_message_id} (Page ID: {existing_page_id}). Skipping creation.")  # noqa: E501
             successful_mappings.append({
                 "gmail_message_id": gmail_message_id,
                 "notion_page_id": existing_page_id,
@@ -706,7 +706,7 @@ def handler(pd: "pipedream"):
                         append_blocks_body = {"children": chunk_data}
                         # Log block types only, not full content (may contain sensitive email data)
                         block_types = [b.get("type", "unknown") for b in chunk_data]
-                        print(f"    Appending {len(chunk_data)} blocks (chunk {chunk_idx + 1}/{len(chunks)}): {block_types}")
+                        print(f"    Appending {len(chunk_data)} blocks (chunk {chunk_idx + 1}/{len(chunks)}): {block_types}")  # noqa: E501
 
                         blocks_url = f"{notion_blocks_api_url_base}{page_id}/children"
                         retry_with_backoff(

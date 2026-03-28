@@ -125,16 +125,16 @@ def normalize_dates(start, end):
     if start_is_datetime and not end_is_datetime:
         # Start is dateTime, end is date-only
         # Convert end to dateTime at end of day
-        logger.info(f"Normalizing dates: start is dateTime, end is date-only")
+        logger.info("Normalizing dates: start is dateTime, end is date-only")
         return start, f"{end}T23:59:59"
     else:
         # Start is date-only, end is dateTime
         # Convert start to dateTime at start of day
-        logger.info(f"Normalizing dates: start is date-only, end is dateTime")
+        logger.info("Normalizing dates: start is date-only, end is dateTime")
         return f"{start}T00:00:00", end
 
 
-def handler(pd: "pipedream"):
+def handler(pd: "pipedream"):  # noqa: F821
     """
     Processes Notion task data from a Pipedream trigger, ensuring safe access
     to potentially missing data paths and handling create/update logic.

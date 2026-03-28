@@ -5,7 +5,7 @@ These fixtures provide mock objects that simulate the Pipedream runtime environm
 allowing unit tests to run without actual API connections.
 """
 import pytest
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock, PropertyMock  # noqa: F401
 
 
 class MockFlow:
@@ -27,6 +27,13 @@ class MockDataStore(dict):
         return super().get(key, default)
 
 
+class MockState(dict):
+    """Mock Pipedream pd.state — a persistent dict between workflow executions."""
+
+    def get(self, key, default=None):
+        return super().get(key, default)
+
+
 class MockPipedream:
     """Mock Pipedream context object for testing handlers."""
 
@@ -35,6 +42,7 @@ class MockPipedream:
         self.steps = {}
         self.flow = MockFlow()
         self.data_store = MockDataStore()
+        self.state = MockState()
 
 
 @pytest.fixture
@@ -238,7 +246,7 @@ def sample_gtask_trigger():
         "trigger": {
             "event": {
                 "title": "Task from Notion",
-                "notes": "Notion Task: Task from Notion\nLink: https://www.notion.so/Test-Task-abc123def456789012345678901234ab",
+                "notes": "Notion Task: Task from Notion\nLink: https://www.notion.so/Test-Task-abc123def456789012345678901234ab",  # noqa: E501
                 "due": "2024-01-20T00:00:00.000Z",
                 "status": "needsAction"  # Not completed
             }
@@ -253,7 +261,7 @@ def sample_gtask_trigger_completed():
         "trigger": {
             "event": {
                 "title": "Completed Task from Notion",
-                "notes": "Notion Task: Completed Task\nLink: https://www.notion.so/Test-Task-abc123def456789012345678901234ab",
+                "notes": "Notion Task: Completed Task\nLink: https://www.notion.so/Test-Task-abc123def456789012345678901234ab",  # noqa: E501
                 "due": "2024-01-20T00:00:00.000Z",
                 "status": "completed"
             }

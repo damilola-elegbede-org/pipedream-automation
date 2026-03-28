@@ -265,7 +265,7 @@ if __name__ == "__main__":
     try:
         config = load_config(args.validate)
         validate_config(config)
-        print(f"Configuration is valid!")
+        print("Configuration is valid!")
         print(f"  Version: {config.version}")
         print(f"  Workflows: {len(config.workflows)}")
         for key, wf in config.workflows.items():

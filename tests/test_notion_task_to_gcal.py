@@ -1,7 +1,7 @@
 """
 Tests for notion_task_to_gcal.py Pipedream step.
 """
-import pytest
+import pytest  # noqa: F401
 import sys
 import os
 
@@ -95,7 +95,7 @@ class TestHandler:
             }
         }
 
-        result = handler(mock_pd)
+        result = handler(mock_pd)  # noqa: F841
 
         assert mock_pd.flow.exit_called is True
         assert "Due Date is missing" in mock_pd.flow.exit_message
@@ -114,7 +114,7 @@ class TestHandler:
             }
         }
 
-        result = handler(mock_pd)
+        result = handler(mock_pd)  # noqa: F841
 
         assert mock_pd.flow.exit_called is True
         assert "Google Event ID exists" in mock_pd.flow.exit_message
