@@ -9,8 +9,9 @@ from unittest.mock import patch
 
 import pytest
 
-from src.deploy.exceptions import AuthenticationError
+from src.deploy.exceptions import AuthenticationError, CredentialSecurityError
 from src.deploy.utils import (
+    _validate_credential_file_security,
     check_pipedream_api_support,
     encode_cookies_base64,
     ensure_screenshot_dir,
@@ -191,6 +192,67 @@ class TestLoadAndSetEnvLocal:
         assert os.environ.get("CANONICAL_KEY") is None
         assert "EXPLICIT_KEY" in result
         assert "CANONICAL_KEY" not in result
+
+    def test_canonical_validation_failure_raises(self, tmp_path, monkeypatch):
+        """Canonical fallback is blocked when credential file security validation fails."""
+        import src.deploy.utils as utils_mod
+
+        canonical_dir = tmp_path / "credentials"
+        canonical_dir.mkdir()
+        canonical_env = canonical_dir / ".env.local"
+        canonical_env.write_text("FALLBACK_VAR=fallback_val\n")
+        canonical_env.chmod(0o644)
+
+        monkeypatch.setattr(utils_mod, "ENV_LOCAL_PATH", tmp_path / "missing.env.local")
+        monkeypatch.setattr(utils_mod, "CANONICAL_ENV_PATH", canonical_env)
+        monkeypatch.delenv("FALLBACK_VAR", raising=False)
+
+        with pytest.raises(CredentialSecurityError):
+            utils_mod.load_and_set_env_local()
+
+
+class TestValidateCredentialFileSecurity:
+    """Tests for credential file security validation."""
+
+    def test_rejects_file_owned_by_another_uid(self, tmp_path, monkeypatch):
+        cred_file = tmp_path / ".env.local"
+        cred_file.write_text("KEY=value\n")
+        cred_file.chmod(0o600)
+
+        actual_uid = cred_file.stat().st_uid
+        monkeypatch.setattr("src.deploy.utils.os.getuid", lambda: actual_uid + 1)
+
+        with pytest.raises(CredentialSecurityError, match="owned by the current user"):
+            _validate_credential_file_security(cred_file)
+
+    def test_rejects_file_with_group_or_world_permissions(self, tmp_path):
+        cred_file = tmp_path / ".env.local"
+        cred_file.write_text("KEY=value\n")
+        cred_file.chmod(0o644)
+
+        with pytest.raises(CredentialSecurityError, match="unsafe permissions"):
+            _validate_credential_file_security(cred_file)
+
+    def test_accepts_file_with_mode_600(self, tmp_path):
+        cred_file = tmp_path / ".env.local"
+        cred_file.write_text("KEY=value\n")
+        cred_file.chmod(0o600)
+
+        _validate_credential_file_security(cred_file)
+
+    def test_rejects_world_writable_parent_dir(self, tmp_path):
+        cred_dir = tmp_path / "credentials"
+        cred_dir.mkdir()
+        cred_file = cred_dir / ".env.local"
+        cred_file.write_text("KEY=value\n")
+        cred_file.chmod(0o600)
+        cred_dir.chmod(0o777)
+
+        try:
+            with pytest.raises(CredentialSecurityError, match="world-writable"):
+                _validate_credential_file_security(cred_file)
+        finally:
+            cred_dir.chmod(0o755)
 
 
 class TestEncodeCookiesBase64:

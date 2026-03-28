@@ -52,3 +52,9 @@ class ConfigurationError(PipedreamSyncError):
     """Raised when configuration is invalid or missing."""
 
     pass
+
+
+class CredentialSecurityError(PipedreamSyncError):
+    """Raised when a credential file has unsafe ownership or permissions."""
+
+    pass

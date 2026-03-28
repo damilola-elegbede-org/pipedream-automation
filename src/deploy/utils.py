@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .exceptions import AuthenticationError
+from .exceptions import AuthenticationError, CredentialSecurityError
 
 
 # Default path for .env.local file
@@ -55,6 +55,30 @@ def load_env_local(env_path: Optional[Path] = None) -> dict[str, str]:
     return env_vars
 
 
+def _validate_credential_file_security(path: Path) -> None:
+    """Validate that a credential file is safe to load."""
+    file_stat = path.stat()
+    parent_stat = path.parent.stat()
+
+    if file_stat.st_uid != os.getuid():
+        raise CredentialSecurityError(
+            f"Credential file {path} must be owned by the current user "
+            f"(expected UID {os.getuid()}, got {file_stat.st_uid})."
+        )
+
+    if file_stat.st_mode & 0o077:
+        raise CredentialSecurityError(
+            f"Credential file {path} has unsafe permissions "
+            f"{oct(file_stat.st_mode & 0o777)}; expected 0o600 or stricter."
+        )
+
+    if parent_stat.st_mode & 0o002:
+        raise CredentialSecurityError(
+            f"Credential file directory {path.parent} is world-writable "
+            f"({oct(parent_stat.st_mode & 0o777)}); refusing to load credentials."
+        )
+
+
 def load_and_set_env_local(env_path: Optional[Path] = None) -> dict[str, str]:
     """
     Load .env.local and set as environment variables.
@@ -94,6 +118,8 @@ def load_and_set_env_local(env_path: Optional[Path] = None) -> dict[str, str]:
         # Phase 1: repo-local .env.local (CWD)
         _apply(ENV_LOCAL_PATH)
         # Phase 2: canonical credentials file (fills any gaps left by Phase 1)
+        if CANONICAL_ENV_PATH.exists():
+            _validate_credential_file_security(CANONICAL_ENV_PATH)
         _apply(CANONICAL_ENV_PATH)
 
     return loaded
