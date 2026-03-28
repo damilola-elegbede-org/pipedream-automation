@@ -123,6 +123,7 @@ class TestLoadAndSetEnvLocal:
 
         repo_env.write_text("REPO_ONLY=repo_val\n")
         canonical_env.write_text("CANONICAL_ONLY=canonical_val\n")
+        canonical_env.chmod(0o600)
 
         # Patch module-level paths so the test is hermetic
         monkeypatch.setattr(utils_mod, "ENV_LOCAL_PATH", repo_env)
@@ -146,6 +147,7 @@ class TestLoadAndSetEnvLocal:
 
         repo_env.write_text("SHARED_KEY=from_repo\n")
         canonical_env.write_text("SHARED_KEY=from_canonical\n")
+        canonical_env.chmod(0o600)
 
         monkeypatch.setattr(utils_mod, "ENV_LOCAL_PATH", repo_env)
         monkeypatch.setattr(utils_mod, "CANONICAL_ENV_PATH", canonical_env)
@@ -161,6 +163,7 @@ class TestLoadAndSetEnvLocal:
 
         canonical_env = tmp_path / "canonical.env.local"
         canonical_env.write_text("FALLBACK_VAR=fallback_val\n")
+        canonical_env.chmod(0o600)
 
         # Point repo env at a non-existent file
         monkeypatch.setattr(utils_mod, "ENV_LOCAL_PATH", tmp_path / "missing.env.local")
