@@ -1407,6 +1407,13 @@ class PipedreamSyncer:
         print(f"\nSyncing {len(keys_to_sync)} workflow(s)...")
         if self.dry_run:
             print("[DRY RUN - No changes will be made]\n")
+            # In dry-run mode, skip browser setup entirely — just validate and enumerate.
+            # Previously this caused a hang because setup_browser_interactive() launches
+            # a headed browser and wait_for_login() blocks for up to 5 minutes.
+            for key in keys_to_sync:
+                result = await self.sync_workflow(key, base_path)
+                self.results.append(result)
+            return self.results
 
         try:
             await self.setup_browser_interactive()
@@ -1497,19 +1504,21 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"Failed: {report['failed']}")
     print(f"Skipped: {report['skipped']}")
 
-    # Check if Pipedream API now supports code updates
-    from .utils import check_pipedream_api_support
-    print("\n" + "-" * 50)
-    print("API STATUS CHECK")
-    print("-" * 50)
-    api_check = check_pipedream_api_support()
-    if api_check["supports_code_update"]:
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print("NOTICE: " + api_check["message"])
-        print("Consider switching to API-based sync!")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    else:
-        print(api_check["message"])
+    # Check if Pipedream API now supports code updates (skip in dry-run to avoid
+    # unnecessary network requests)
+    if not args.dry_run:
+        from .utils import check_pipedream_api_support
+        print("\n" + "-" * 50)
+        print("API STATUS CHECK")
+        print("-" * 50)
+        api_check = check_pipedream_api_support()
+        if api_check["supports_code_update"]:
+            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            print("NOTICE: " + api_check["message"])
+            print("Consider switching to API-based sync!")
+            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        else:
+            print(api_check["message"])
 
     if report['failed'] > 0:
         return 1

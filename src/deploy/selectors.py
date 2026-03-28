@@ -42,9 +42,17 @@ def validate_workflow_id(workflow_id: str) -> str:
 
 # Login page elements
 LOGIN_FORM = "form[action*='login'], .login-form"
-LOGIN_BUTTON = "button[type='submit'], button:has-text('Log in'), button:has-text('Sign in')"
+LOGIN_BUTTON = "button[type='submit'], button:has-text('Log in'), button:has-text('Sign in'), button:has-text('Continue with Google')"
 USER_MENU = "[data-testid='user-menu'], .user-avatar, .user-dropdown"
-LOGGED_IN_INDICATOR = "[data-testid='user-menu'], .user-avatar, nav >> text=Workflows"
+# LOGGED_IN_INDICATOR: multiple fallback selectors for Pipedream dashboard detection.
+# nav >> text=Workflows is Playwright chain syntax and can be flaky; prefer href-based nav.
+LOGGED_IN_INDICATOR = (
+    "[data-testid='user-menu'], "
+    ".user-avatar, "
+    "a[href*='/projects'], "
+    "a[href*='/workflows'], "
+    "nav a[href*='/@']"
+)
 
 # =============================================================================
 # Navigation Selectors
@@ -78,8 +86,8 @@ def step_by_name(name: str) -> str:
     Pipedream displays step names in the workflow canvas. This selector
     finds a step container that contains the specified name.
 
-    Updated December 2024: Pipedream's DOM structure uses div containers
-    with step names displayed as text. We use text-based selectors as primary.
+    Updated March 2026: Prefer data-attribute and role-based selectors over bare
+    div:has-text() to avoid matching outer layout elements. Includes class fallbacks.
 
     Raises:
         ValidationError: If step name contains invalid characters
@@ -93,17 +101,21 @@ def step_by_name(name: str) -> str:
     # Escape double quotes for CSS attribute selectors
     escaped_double = name.replace('"', '\\"')
 
-    # Primary: Use text selector which reliably finds step names in the UI
-    # Secondary: Try data attributes and class names (fallback)
+    # Primary: data attribute selectors (most precise, if Pipedream adds them)
+    # Secondary: text-based and class selectors (reliable fallbacks)
+    # Note: avoid bare div:has-text() at >> nth=0 as it is overly broad and
+    # can match outer layout divs; prefer tighter class or role-based selectors.
     return (
-        # Text-based selectors (most reliable for current Pipedream UI)
-        f"div:has-text('{escaped_single}') >> nth=0, "
-        # Data attribute selectors (if Pipedream adds them)
+        # Data attribute selectors (preferred — most resilient to DOM changes)
         f'[data-step-name="{escaped_double}"], '
         f"[data-testid='step']:has-text('{escaped_single}'), "
-        # Class-based selectors (legacy)
+        # Role-based selectors (Pipedream step cards often have button/group roles)
+        f"[role='button']:has-text('{escaped_single}'), "
+        f"[role='group']:has-text('{escaped_single}'), "
+        # Class-based selectors (legacy + common Pipedream class patterns)
         f".step-container:has-text('{escaped_single}'), "
-        f".workflow-step:has-text('{escaped_single}')"
+        f".workflow-step:has-text('{escaped_single}'), "
+        f"[class*='step']:has-text('{escaped_single}')"
     )
 
 
@@ -152,13 +164,16 @@ CODE_CONTENT = f"{MONACO_LINES}, {CODEMIRROR_LINES}, {CODEMIRROR6_CONTENT}"
 
 # Autosave status
 SAVE_STATUS = "[data-testid='save-status'], .save-status, .save-indicator"
+# Pipedream (2025+) shows brief "Saving..." / "Saved" text in the editor toolbar area.
+# Both :text() and :has-text() are supported; use multiple fallbacks for resilience.
 SAVING_INDICATOR = "[data-status='saving'], .saving, :has-text('Saving...')"
 SAVED_INDICATOR = "[data-status='saved'], .saved, :has-text('Saved')"
 SAVE_ERROR = "[data-status='error'], .save-error, .error-indicator"
 
-# Deployment status
-DEPLOY_BUTTON = "button:has-text('Deploy'), [data-testid='deploy-button']"
-DEPLOYED_INDICATOR = ":has-text('Deployed'), .deployed-badge"
+# Deployment status — Deploy button appears in workflow build toolbar.
+# Pipedream uses a prominent "Deploy" button; the text locator is most reliable.
+DEPLOY_BUTTON = "button:has-text('Deploy'), [data-testid='deploy-button'], [role='button']:has-text('Deploy')"
+DEPLOYED_INDICATOR = ":has-text('Deployed'), .deployed-badge, :has-text('Active')"
 
 # =============================================================================
 # Error and Alert Selectors
@@ -247,10 +262,11 @@ class SelectorSets:
         LOGGED_IN_INDICATOR,
     ]
 
-    # Wait for step editor to open
+    # Wait for step editor to open (includes CM6 content selector)
     STEP_EDITOR_OPEN = [
         STEP_CONFIG_PANEL,
         CODE_EDITOR,
+        CODEMIRROR6_CONTENT,
     ]
 
     # Wait for save to complete

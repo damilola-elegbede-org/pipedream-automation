@@ -56,35 +56,43 @@ def load_and_set_env_local(env_path: Optional[Path] = None) -> dict[str, str]:
     """
     Load .env.local and set as environment variables.
 
-    Priority order:
-    1. env_path parameter (if provided)
-    2. ./env.local (repo root, for dev)
-    3. ~/.openclaw-dara/credentials/pipedream/.env.local (canonical)
+    Priority order (later sources override earlier ones, env already set always wins):
+    1. ~/.openclaw-dara/credentials/pipedream/.env.local (canonical — loaded first as base)
+    2. ./env.local (repo root — loaded second, overrides canonical for same keys)
+    3. env_path parameter (if provided — loaded exclusively, skips auto-discovery)
+
+    This layered approach ensures workflow IDs from the canonical credentials file are
+    always present even when the repo .env.local only contains PIPEDREAM_COOKIES.
 
     Args:
-        env_path: Path to env file (defaults to .env.local, with canonical fallback)
+        env_path: Path to env file. If provided, only this file is loaded (no fallback).
+                  If omitted, canonical + repo .env.local are merged.
 
     Returns:
-        Dictionary of loaded environment variables
+        Dictionary of all loaded environment variables (merged)
     """
-    # Determine path to load from
+    merged_vars: dict[str, str] = {}
+
     if env_path:
-        path = env_path
+        # Explicit path: load only that file, no auto-discovery
+        merged_vars = load_env_local(env_path)
     else:
-        # Try repo .env.local first
-        path = Path(".env.local")
-        
-        # If repo .env.local doesn't exist or is incomplete, try canonical path
-        if not path.exists():
-            canonical_env = Path.home() / ".openclaw-dara/credentials/pipedream/.env.local"
-            if canonical_env.exists():
-                path = canonical_env
-    
-    env_vars = load_env_local(path)
-    for key, value in env_vars.items():
-        if key not in os.environ:  # Don't override existing env vars
+        # Auto-discovery: load canonical first (base), then repo .env.local (overlay)
+        canonical_env = Path.home() / ".openclaw-dara/credentials/pipedream/.env.local"
+        if canonical_env.exists():
+            canonical_vars = load_env_local(canonical_env)
+            merged_vars.update(canonical_vars)
+
+        # Repo .env.local overlays canonical (repo-specific values take priority)
+        repo_env = Path(".env.local")
+        if repo_env.exists():
+            repo_vars = load_env_local(repo_env)
+            merged_vars.update(repo_vars)
+
+    for key, value in merged_vars.items():
+        if key not in os.environ:  # Don't override already-set env vars
             os.environ[key] = value
-    return env_vars
+    return merged_vars
 
 
 def save_cookies_to_env_local(
