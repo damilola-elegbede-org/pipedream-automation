@@ -133,14 +133,25 @@ jobs:
           PR_TITLE="${{ github.event.pull_request.title }}"
           REPO="${{ github.repository }}"
 
-          # Extract issue numbers from PR body and title (Closes #N, Fixes #N, Resolves #N, or bare #N)
-          ISSUES=$(echo "$PR_BODY $PR_TITLE" | grep -oE '(close[sd]?|fix(es|ed)?|resolve[sd]?)?[[:space:]]*#[0-9]+' | grep -oE '[0-9]+' | sort -u)
+          # Extract same-repo issue numbers only.
+          # 1. Remove cross-repo refs (word#N patterns like ops#147)
+          # 2. Then extract bare #N or close/fix/resolve #N
+          CLEAN_TEXT=$(echo "$PR_BODY $PR_TITLE" | sed -E 's/[a-zA-Z0-9_.-]+#[0-9]+//g')
+          ISSUES=$(echo "$CLEAN_TEXT" | grep -oE '#[0-9]+' | grep -oE '[0-9]+' | sort -u || true)
+
+          if [ -z "$ISSUES" ]; then
+            echo "No same-repo issue references found in PR"
+            exit 0
+          fi
 
           for ISSUE_NUM in $ISSUES; do
             echo "Processing issue #$ISSUE_NUM"
 
-            ISSUE_NODE_ID=$(gh api "repos/$REPO/issues/$ISSUE_NUM" --jq '.node_id' 2>/dev/null || true)
-            [ -z "$ISSUE_NODE_ID" ] && { echo "Issue #$ISSUE_NUM not found"; continue; }
+            if ! ISSUE_NODE_ID=$(gh api "repos/$REPO/issues/$ISSUE_NUM" --jq '.node_id' 2>/dev/null); then
+              echo "Issue #$ISSUE_NUM not found in $REPO — skipping"
+              continue
+            fi
+            [ -z "$ISSUE_NODE_ID" ] && { echo "Issue #$ISSUE_NUM not found in $REPO"; continue; }
 
             ITEM_ID=$(gh api graphql -f query='
               query($nodeId: ID!) {
@@ -188,10 +199,19 @@ jobs:
           PR_TITLE="${{ github.event.pull_request.title }}"
           REPO="${{ github.repository }}"
 
-          ISSUES=$(echo "$PR_BODY $PR_TITLE" | grep -oE '(close[sd]?|fix(es|ed)?|resolve[sd]?)?[[:space:]]*#[0-9]+' | grep -oE '[0-9]+' | sort -u)
+          CLEAN_TEXT=$(echo "$PR_BODY $PR_TITLE" | sed -E 's/[a-zA-Z0-9_.-]+#[0-9]+//g')
+          ISSUES=$(echo "$CLEAN_TEXT" | grep -oE '#[0-9]+' | grep -oE '[0-9]+' | sort -u || true)
+
+          if [ -z "$ISSUES" ]; then
+            echo "No same-repo issue references found"
+            exit 0
+          fi
 
           for ISSUE_NUM in $ISSUES; do
-            ISSUE_NODE_ID=$(gh api "repos/$REPO/issues/$ISSUE_NUM" --jq '.node_id' 2>/dev/null || true)
+            if ! ISSUE_NODE_ID=$(gh api "repos/$REPO/issues/$ISSUE_NUM" --jq '.node_id' 2>/dev/null); then
+              echo "Issue #$ISSUE_NUM not found — skipping"
+              continue
+            fi
             [ -z "$ISSUE_NODE_ID" ] && continue
 
             ITEM_ID=$(gh api graphql -f query='
