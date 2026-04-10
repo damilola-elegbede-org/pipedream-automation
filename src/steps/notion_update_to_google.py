@@ -71,7 +71,7 @@ def format_due_date(date_str):
     return f"{date_only}T00:00:00.000Z"
 
 
-def handler(pd: "pipedream"):
+def handler(pd: "pipedream"):  # noqa: F821
     """
     Processes Notion page update data from a Pipedream trigger for updating
     a Google Task, ensuring safe access to data.

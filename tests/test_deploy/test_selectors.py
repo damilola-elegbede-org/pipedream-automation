@@ -1,6 +1,6 @@
 """Tests for Pipedream UI DOM selectors."""
 
-import pytest
+import pytest  # noqa: F401
 
 from src.deploy.selectors import (
     CODE_EDITOR,

@@ -52,7 +52,7 @@ from .exceptions import (
     SaveError,
     StepNotFoundError,
 )
-from .selectors import (
+from .selectors import (  # noqa: F401
     CODE_EDITOR,
     CODEMIRROR6_EDITOR,
     LOGGED_IN_INDICATOR,
@@ -64,7 +64,7 @@ from .selectors import (
     step_by_name,
     workflow_edit_url,
 )
-from .utils import (
+from .utils import (  # noqa: F401
     ensure_screenshot_dir,
     generate_report,
     get_cached_cookies,
@@ -350,7 +350,7 @@ class PipedreamSyncer:
                 # Try clicking the text's parent elements (step card)
                 # In Pipedream, the clickable area is usually a few levels up
                 for parent_selector in [
-                    f"text='{step_name}' >> xpath=ancestor::div[contains(@class, 'step') or contains(@class, 'node') or @role='button'][1]",
+                    f"text='{step_name}' >> xpath=ancestor::div[contains(@class, 'step') or contains(@class, 'node') or @role='button'][1]",  # noqa: E501
                     f"div:has(> div:has-text('{step_name}'))",
                     f"div:has-text('{step_name}'):not(:has(div:has-text('{step_name}')))",
                 ]:
@@ -740,7 +740,7 @@ class PipedreamSyncer:
                 raise CodeUpdateError(f"Expected 1 target editor, found {count}")
             await target.click(timeout=5000)
             await asyncio.sleep(0.5)
-            self.log(f"  Step 1b: Clicked visible editor", "info")
+            self.log("  Step 1b: Clicked visible editor", "info")
         except CodeUpdateError:
             raise
         except Exception as e:
@@ -856,7 +856,7 @@ class PipedreamSyncer:
                     self.log(f"  ✓ Verified: {step_name} has correct handler ({expected_handler.group(1)})", "info")
                     return True
                 else:
-                    self.log(f"  ✗ MISMATCH: {step_name} expected {expected_handler.group(1)}, got {actual_handler.group(1)}", "error")
+                    self.log(f"  ✗ MISMATCH: {step_name} expected {expected_handler.group(1)}, got {actual_handler.group(1)}", "error")  # noqa: E501
                     return False
 
             # Fallback: check first 100 chars contain expected content
@@ -974,7 +974,7 @@ class PipedreamSyncer:
                             self.log("  No 'Deploying' indicator found, proceeding anyway", "debug")
 
                         # Take screenshot to capture post-click state for debugging
-                        safe_name = workflow_name.replace(" ", "_").replace("/", "_")[:30] if workflow_name else "unknown"
+                        safe_name = workflow_name.replace(" ", "_").replace("/", "_")[:30] if workflow_name else "unknown"  # noqa: E501
                         await self.take_screenshot(f"post-deploy-click-{safe_name}")
 
                         # Wait for deployment to complete by checking workflow list page
@@ -1041,7 +1041,7 @@ class PipedreamSyncer:
                     try:
                         workflows_on_page = await self.page.evaluate("""
                             () => {
-                                const rows = document.querySelectorAll('a[href*="/build"], [class*="workflow"], tr, [role="row"]');
+                                const rows = document.querySelectorAll('a[href*="/build"], [class*="workflow"], tr, [role="row"]');  # noqa: E501
                                 return [...rows].slice(0, 10).map(row => {
                                     const text = (row.innerText || row.textContent || '').trim();
                                     return text.substring(0, 100);  // First 100 chars
@@ -1059,7 +1059,7 @@ class PipedreamSyncer:
                 has_pending = await self.page.evaluate("""
                     (workflowName) => {
                         // Find all workflow rows/cards on the page
-                        const rows = document.querySelectorAll('a[href*="/build"], [class*="workflow"], tr, [role="row"]');
+                        const rows = document.querySelectorAll('a[href*="/build"], [class*="workflow"], tr, [role="row"]');  # noqa: E501
                         for (const row of rows) {
                             const text = row.innerText || row.textContent || '';
                             // Check if this row contains both the workflow name and DEPLOY PENDING
@@ -1131,7 +1131,7 @@ class PipedreamSyncer:
 
     async def verify_workflow_after_deploy(
         self,
-        workflow: "WorkflowConfig",
+        workflow: "WorkflowConfig",  # noqa: F821
         base_path: Path,
     ) -> bool:
         """Verify all steps have correct code by reloading the workflow."""
@@ -1383,12 +1383,12 @@ class PipedreamSyncer:
                     print(f"    Deployed {workflow_key}")
 
                     # Verify by reloading and checking each step
-                    print(f"    Verifying deployment...")
+                    print("    Verifying deployment...")
                     verified = await self.verify_workflow_after_deploy(workflow, base_path)
                     if verified:
-                        print(f"    ✓ All steps verified")
+                        print("    ✓ All steps verified")
                     else:
-                        print(f"    ✗ Verification failed - some steps may not have saved")
+                        print("    ✗ Verification failed - some steps may not have saved")
                         result.status = "partial"
                 else:
                     print(f"    Warning: {workflow_key} may not be deployed")

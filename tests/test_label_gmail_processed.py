@@ -101,7 +101,7 @@ class TestHandler:
     @patch('steps.label_gmail_processed.get_label_id')
     @patch('steps.label_gmail_processed.requests.post')
     @patch('steps.label_gmail_processed.time.sleep')
-    def test_labels_messages_successfully(self, mock_sleep, mock_post, mock_get_label, mock_pd, gmail_auth, sample_successful_mappings):
+    def test_labels_messages_successfully(self, mock_sleep, mock_post, mock_get_label, mock_pd, gmail_auth, sample_successful_mappings):  # noqa: E501
         mock_pd.inputs = gmail_auth
         mock_pd.steps = {"create_notion_task": {"$return_value": sample_successful_mappings}}
         mock_get_label.return_value = "Label_123"
@@ -121,7 +121,7 @@ class TestHandler:
     @patch('steps.label_gmail_processed.get_label_id')
     @patch('steps.label_gmail_processed.requests.post')
     @patch('steps.label_gmail_processed.time.sleep')
-    def test_handles_partial_label_failure(self, mock_sleep, mock_post, mock_get_label, mock_pd, gmail_auth, sample_successful_mappings):
+    def test_handles_partial_label_failure(self, mock_sleep, mock_post, mock_get_label, mock_pd, gmail_auth, sample_successful_mappings):  # noqa: E501
         mock_pd.inputs = gmail_auth
         mock_pd.steps = {"create_notion_task": {"$return_value": sample_successful_mappings}}
         mock_get_label.return_value = "Label_123"

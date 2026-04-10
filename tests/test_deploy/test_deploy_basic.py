@@ -1,10 +1,10 @@
 """Tests for basic deploy_to_pipedream components (dataclasses, non-async methods)."""
 
-import asyncio
+import asyncio  # noqa: F401
 from dataclasses import fields
-from io import StringIO
-import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from io import StringIO  # noqa: F401
+import sys  # noqa: F401
+from unittest.mock import AsyncMock, MagicMock, patch  # noqa: F401
 
 import pytest
 

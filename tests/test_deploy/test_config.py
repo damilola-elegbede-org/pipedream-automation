@@ -1,9 +1,9 @@
 """Tests for deployment configuration loading and validation."""
 
 import pytest
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 
-from src.deploy.config import (
+from src.deploy.config import (  # noqa: F401
     DeployConfig,
     DeploySettings,
     StepConfig,

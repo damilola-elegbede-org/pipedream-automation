@@ -230,12 +230,12 @@ Content-Type: application/json
     return successfully_labeled, errors
 
 
-def handler(pd: "pipedream"):
+def handler(pd: "pipedream"):  # noqa: F821
     # --- 1. Get Gmail OAuth Token ---
     try:
         token = pd.inputs["gmail"]["$auth"]["oauth_access_token"]
     except KeyError:
-        raise Exception("Gmail account not connected or input name is not 'gmail'. Please connect a Gmail account with 'gmail.modify' and 'gmail.readonly' scopes.")
+        raise Exception("Gmail account not connected or input name is not 'gmail'. Please connect a Gmail account with 'gmail.modify' and 'gmail.readonly' scopes.")  # noqa: E501
 
     common_headers = {"Authorization": f"Bearer {token}"}
 
@@ -248,7 +248,7 @@ def handler(pd: "pipedream"):
     try:
         previous_step_output = pd.steps[PREVIOUS_STEP_NAME]["$return_value"]
     except KeyError:
-        print(f"Error: Could not find return value from step '{PREVIOUS_STEP_NAME}'. Ensure the step name is correct and it exported data.")
+        print(f"Error: Could not find return value from step '{PREVIOUS_STEP_NAME}'. Ensure the step name is correct and it exported data.")  # noqa: E501
         return {"error": f"Could not find data from step {PREVIOUS_STEP_NAME}"}
     except Exception as e:
         print(f"An unexpected error occurred accessing previous step data: {e}")
@@ -256,7 +256,7 @@ def handler(pd: "pipedream"):
 
     # Check if the previous step output the expected structure
     if not isinstance(previous_step_output, dict) or "successful_mappings" not in previous_step_output:
-        print(f"Error: Expected a dictionary with 'successful_mappings' key from step '{PREVIOUS_STEP_NAME}', but received: {type(previous_step_output)}")
+        print(f"Error: Expected a dictionary with 'successful_mappings' key from step '{PREVIOUS_STEP_NAME}', but received: {type(previous_step_output)}")  # noqa: E501
         return {"error": "Invalid data format from previous step."}
 
     mappings_to_process = previous_step_output["successful_mappings"]
@@ -275,14 +275,14 @@ def handler(pd: "pipedream"):
         if isinstance(item, dict) and "gmail_message_id" in item:
             message_ids_to_label.append(item["gmail_message_id"])
         else:
-            print(f"Warning: Skipping item in 'successful_mappings' list as it's not a dictionary or missing 'gmail_message_id': {item}")
+            print(f"Warning: Skipping item in 'successful_mappings' list as it's not a dictionary or missing 'gmail_message_id': {item}")  # noqa: E501
 
     if not message_ids_to_label:
         print("No valid Gmail message IDs found in the 'successful_mappings' data.")
         return {"status": "No valid message IDs", "labeled_messages": 0}
 
     # --- 4. Apply Labels Using Batch API ---
-    print(f"Starting to add label '{LABEL_NAME_TO_ADD}' (ID: {target_label_id}) to {len(message_ids_to_label)} message(s)...")
+    print(f"Starting to add label '{LABEL_NAME_TO_ADD}' (ID: {target_label_id}) to {len(message_ids_to_label)} message(s)...")  # noqa: E501
     print(f"Using batch API for efficiency (batch size: {BATCH_SIZE})...")
 
     successfully_labeled_ids, errors = batch_label_messages(

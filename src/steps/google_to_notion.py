@@ -9,7 +9,6 @@ Usage: Copy-paste into a Pipedream Python step
 """
 import logging
 import re
-import requests
 
 # Configure logging for Pipedream
 logger = logging.getLogger()
@@ -150,7 +149,7 @@ def format_notion_date(due_date):
     return due_date.split('T')[0]
 
 
-def handler(pd: "pipedream"):
+def handler(pd: "pipedream"):  # noqa: F821
     """
     Processes Google Tasks triggers, checks if they originated from Notion,
     and extracts relevant details including the Notion Page ID from the notes.
@@ -176,7 +175,7 @@ def handler(pd: "pipedream"):
     page_id = validate_notion_page_id(raw_page_id)
 
     if not page_id:
-        exit_message = f"Could not reliably extract/validate Notion Page ID from notes for task '{task_title}'. Raw extraction: '{raw_page_id}'. Skipping."
+        exit_message = f"Could not reliably extract/validate Notion Page ID from notes for task '{task_title}'. Raw extraction: '{raw_page_id}'. Skipping."  # noqa: E501
         logger.warning(exit_message)
         pd.flow.exit(exit_message)
         return

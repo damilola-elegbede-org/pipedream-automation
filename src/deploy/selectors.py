@@ -36,11 +36,13 @@ def validate_workflow_id(workflow_id: str) -> str:
         )
     return workflow_id
 
+
 # =============================================================================
 # Authentication Selectors
 # =============================================================================
 
 # Login page elements
+
 LOGIN_FORM = "form[action*='login'], .login-form"
 LOGIN_BUTTON = "button[type='submit'], button:has-text('Log in'), button:has-text('Sign in')"
 USER_MENU = "[data-testid='user-menu'], .user-avatar, .user-dropdown"

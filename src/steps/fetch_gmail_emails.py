@@ -138,12 +138,12 @@ def deduplicate_by_thread(email_list):
     return [entry["email"] for entry in threads.values()]
 
 
-def handler(pd: "pipedream"):
+def handler(pd: "pipedream"):  # noqa: F821
     # --- 1. Authentication ---
     try:
         token = f'{pd.inputs["gmail"]["$auth"]["oauth_access_token"]}'
     except KeyError:
-        raise Exception("Gmail account not connected or input name is not 'gmail'. Please connect a Gmail account to this step.")
+        raise Exception("Gmail account not connected or input name is not 'gmail'. Please connect a Gmail account to this step.")  # noqa: E501
 
     authorization = f'Bearer {token}'
     common_headers = {"Authorization": authorization}
@@ -266,7 +266,7 @@ def handler(pd: "pipedream"):
     print("\n--- Fetch Complete ---")
     print(f"Successfully fetched details for {original_count} messages.")
     if original_count != deduped_count:
-        print(f"After thread deduplication: {deduped_count} unique threads (removed {original_count - deduped_count} duplicates)")
+        print(f"After thread deduplication: {deduped_count} unique threads (removed {original_count - deduped_count} duplicates)")  # noqa: E501
     if failed_message_ids:
         print(f"Failed to fetch {len(failed_message_ids)} messages: {[f['message_id'] for f in failed_message_ids]}")
 
