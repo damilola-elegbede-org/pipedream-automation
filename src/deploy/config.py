@@ -122,7 +122,7 @@ class DeployConfig:
                 raise ValidationError(f"Workflow '{key}': {e}")
 
 
-def _substitute_env_vars(value: Any) -> Any:
+def _substitute_env_vars(value: Any, allow_missing: bool = False) -> Any:
     """
     Recursively substitute environment variables in configuration values.
 
@@ -147,6 +147,8 @@ def _substitute_env_vars(value: Any) -> Any:
             elif default is not None:
                 return default
             else:
+                if allow_missing:
+                    return ""
                 raise ConfigurationError(
                     f"Environment variable '{var_name}' is not set and has no default. "
                     f"Set it with: export {var_name}=<value>"
@@ -155,16 +157,16 @@ def _substitute_env_vars(value: Any) -> Any:
         return ENV_VAR_PATTERN.sub(replace_match, value)
 
     elif isinstance(value, dict):
-        return {k: _substitute_env_vars(v) for k, v in value.items()}
+        return {k: _substitute_env_vars(v, allow_missing) for k, v in value.items()}
 
     elif isinstance(value, list):
-        return [_substitute_env_vars(item) for item in value]
+        return [_substitute_env_vars(item, allow_missing) for item in value]
 
     else:
         return value
 
 
-def load_config(config_path: str) -> DeployConfig:
+def load_config(config_path: str, allow_missing_env: bool = False) -> DeployConfig:
     """
     Load and parse the deployment configuration file.
 
@@ -191,7 +193,7 @@ def load_config(config_path: str) -> DeployConfig:
         raise ConfigurationError(f"Empty configuration file: {config_path}")
 
     # Substitute environment variables
-    data = _substitute_env_vars(raw_data)
+    data = _substitute_env_vars(raw_data, allow_missing_env)
 
     # Parse workflows
     workflows = {}
