@@ -20,6 +20,8 @@ from steps.update_horizon_scores import (  # noqa: F401
     fetch_page_metadata,
     query_tasks_incremental,
     query_tasks_unscored,
+    query_tasks,
+    resolve_project_relation,
     call_claude,
     score_tasks_batch,
     markdown_to_notion_blocks,
@@ -871,3 +873,186 @@ class TestIncrementalQueries:
         hs_filters = [f for f in and_conditions if f.get("property") == "Horizon Score"]
         assert len(hs_filters) == 1
         assert hs_filters[0] == {"property": "Horizon Score", "number": {"is_empty": True}}
+
+
+class TestDueDateFilterProperty:
+    """ENG-1933: the live Notion property is "Due Date", not "Due" — a filter
+    keyed on "Due" 400s against the real database. Guards all three query
+    functions plus query_tasks' Python-side fallback filter regressing back
+    to the wrong key."""
+
+    def _filter_payload_from_mock(self, mock_session):
+        call_args = mock_session.post.call_args
+        return call_args[1]["json"] if "json" in call_args[1] else call_args.kwargs["json"]
+
+    def test_query_tasks_unscored_uses_due_date_property(self):
+        mock_session = MagicMock()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"results": [], "has_more": False}
+        mock_session.post.return_value = mock_response
+
+        query_tasks_unscored("db_123", {"Authorization": "Bearer tok"}, session=mock_session)
+
+        payload = self._filter_payload_from_mock(mock_session)
+        and_conditions = payload["filter"]["and"]
+        due_filters = [f for f in and_conditions if f.get("property") in ("Due", "Due Date")]
+        assert len(due_filters) == 1
+        assert due_filters[0] == {"property": "Due Date", "date": {"is_empty": True}}
+
+    def test_query_tasks_incremental_uses_due_date_property(self):
+        mock_session = MagicMock()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"results": [], "has_more": False}
+        mock_session.post.return_value = mock_response
+
+        query_tasks_incremental(
+            "db_123", {"Authorization": "Bearer tok"}, "2024-01-01T00:00:00.000Z", session=mock_session
+        )
+
+        payload = self._filter_payload_from_mock(mock_session)
+        and_conditions = payload["filter"]["and"]
+        due_filters = [f for f in and_conditions if f.get("property") in ("Due", "Due Date")]
+        assert len(due_filters) == 1
+        assert due_filters[0] == {"property": "Due Date", "date": {"is_empty": True}}
+
+    def test_query_tasks_full_scan_uses_due_date_property(self):
+        mock_session = MagicMock()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"results": [], "has_more": False}
+        mock_session.post.return_value = mock_response
+
+        query_tasks("db_123", {"Authorization": "Bearer tok"}, session=mock_session)
+
+        payload = self._filter_payload_from_mock(mock_session)
+        and_conditions = payload["filter"]["and"]
+        due_filters = [f for f in and_conditions if f.get("property") in ("Due", "Due Date")]
+        assert len(due_filters) == 1
+        assert due_filters[0] == {"property": "Due Date", "date": {"is_empty": True}}
+
+    def test_query_tasks_fallback_filters_on_due_date_key(self):
+        """The compound-filter-failed fallback re-filters in Python — it must
+        read the same "Due Date" key the live API returns, not "Due" (which
+        is always absent, so the old code silently kept every task)."""
+        mock_session = MagicMock()
+        compound_response = MagicMock()
+        compound_response.post_effect = None
+        fallback_response = MagicMock()
+        fallback_response.json.return_value = {
+            "results": [
+                {"id": "has_due", "properties": {"Due Date": {"date": {"start": "2025-01-01"}}}},
+                {"id": "no_due", "properties": {"Due Date": {"date": None}}},
+            ],
+            "has_more": False,
+        }
+        mock_session.post.side_effect = [Exception("compound filter unsupported"), fallback_response]
+
+        tasks = query_tasks("db_123", {"Authorization": "Bearer tok"}, session=mock_session)
+
+        ids = [t["id"] for t in tasks]
+        assert ids == ["no_due"]
+
+
+class TestResolveProjectRelation:
+    """ENG-1933 AC4: a Project relation must resolve to the target page's
+    name + Status, not just a bare "[Related to N project(s)]" count."""
+
+    def test_resolves_name_and_status_type(self):
+        mock_session = MagicMock()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "properties": {
+                "Name": {"type": "title", "title": [{"plain_text": "A Lo Cubano Boulder Fest"}]},
+                "Status": {"type": "status", "status": {"name": "In Progress"}},
+            }
+        }
+        mock_session.get.return_value = mock_response
+
+        name, status = resolve_project_relation("proj_1", {"Authorization": "Bearer tok"}, session=mock_session)
+        assert name == "A Lo Cubano Boulder Fest"
+        assert status == "In Progress"
+
+    def test_resolves_status_as_select_type(self):
+        mock_session = MagicMock()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "properties": {
+                "Name": {"type": "title", "title": [{"plain_text": "Old Project"}]},
+                "Status": {"type": "select", "select": {"name": "Canceled"}},
+            }
+        }
+        mock_session.get.return_value = mock_response
+
+        name, status = resolve_project_relation("proj_2", {"Authorization": "Bearer tok"}, session=mock_session)
+        assert name == "Old Project"
+        assert status == "Canceled"
+
+    def test_caches_repeat_lookups(self):
+        mock_session = MagicMock()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "properties": {"Name": {"type": "title", "title": [{"plain_text": "Cached Project"}]}}
+        }
+        mock_session.get.return_value = mock_response
+        cache = {}
+
+        resolve_project_relation("proj_3", {"Authorization": "Bearer tok"}, session=mock_session, cache=cache)
+        resolve_project_relation("proj_3", {"Authorization": "Bearer tok"}, session=mock_session, cache=cache)
+
+        assert mock_session.get.call_count == 1
+
+    def test_fails_open_on_error(self):
+        mock_session = MagicMock()
+        mock_session.get.side_effect = Exception("network error")
+
+        name, status = resolve_project_relation("proj_missing", {"Authorization": "Bearer tok"}, session=mock_session)
+        assert name == ""
+        assert status == ""
+
+
+class TestExtractTaskInfoProjectResolution:
+    """ENG-1933 AC4: extract_task_info resolves a Project relation via
+    resolve_project_relation when headers are supplied, and falls back to
+    the prior placeholder when they are not (unit-test isolation path)."""
+
+    def test_resolves_project_relation_when_headers_supplied(self):
+        task = {
+            "id": "task_1",
+            "properties": {
+                "Project": {"type": "relation", "relation": [{"id": "proj_1"}]},
+            },
+        }
+        mock_session = MagicMock()
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "properties": {
+                "Name": {"type": "title", "title": [{"plain_text": "Flagship Project"}]},
+                "Status": {"type": "status", "status": {"name": "In Progress"}},
+            }
+        }
+        mock_session.get.return_value = mock_response
+
+        info = extract_task_info(task, {"Authorization": "Bearer tok"}, mock_session, {})
+        assert info["project"] == "Flagship Project (In Progress)"
+
+    def test_falls_back_to_placeholder_without_headers(self):
+        task = {
+            "id": "task_1",
+            "properties": {
+                "Project": {"type": "relation", "relation": [{"id": "proj_1"}, {"id": "proj_2"}]},
+            },
+        }
+        info = extract_task_info(task)
+        assert info["project"] == "[Related to 2 project(s)]"
+
+    def test_falls_back_to_placeholder_when_resolution_yields_no_name(self):
+        task = {
+            "id": "task_1",
+            "properties": {
+                "Project": {"type": "relation", "relation": [{"id": "proj_1"}]},
+            },
+        }
+        mock_session = MagicMock()
+        mock_session.get.side_effect = Exception("boom")
+
+        info = extract_task_info(task, {"Authorization": "Bearer tok"}, mock_session, {})
+        assert info["project"] == "[Related to 1 project(s)]"

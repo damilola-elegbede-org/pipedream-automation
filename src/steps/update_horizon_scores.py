@@ -169,7 +169,7 @@ def query_tasks_incremental(database_id, headers, since_ts, session=None):
         "filter": {
             "and": [
                 {"or": or_conditions},
-                {"property": "Due", "date": {"is_empty": True}},
+                {"property": "Due Date", "date": {"is_empty": True}},
                 {"timestamp": "last_edited_time", "last_edited_time": {"after": since_ts}},
             ]
         },
@@ -221,7 +221,7 @@ def query_tasks_unscored(database_id, headers, session=None):
         "filter": {
             "and": [
                 {"or": or_conditions},
-                {"property": "Due", "date": {"is_empty": True}},
+                {"property": "Due Date", "date": {"is_empty": True}},
                 {"property": "Horizon Score", "number": {"is_empty": True}},
             ]
         },
@@ -946,7 +946,7 @@ def query_tasks(database_id, headers, session=None):
         "filter": {
             "and": [
                 {"or": or_conditions},
-                {"property": "Due", "date": {"is_empty": True}}
+                {"property": "Due Date", "date": {"is_empty": True}}
             ]
         },
         "page_size": 100
@@ -985,7 +985,7 @@ def query_tasks(database_id, headers, session=None):
         if use_fallback:
             original_count = len(tasks)
             tasks = [t for t in tasks
-                     if not t.get("properties", {}).get("Due", {}).get("date")]
+                     if not t.get("properties", {}).get("Due Date", {}).get("date")]
             print(f"  Fetched {original_count} tasks, {len(tasks)} without due dates (total: {len(all_tasks) + len(tasks)})")  # noqa: E501
         else:
             print(f"  Fetched {len(tasks)} tasks (total: {len(all_tasks) + len(tasks)})")
@@ -1003,9 +1003,53 @@ def query_tasks(database_id, headers, session=None):
     return all_tasks
 
 
-def extract_task_info(task):
+def resolve_project_relation(page_id, headers, session=None, cache=None):
+    """
+    Resolve a Project relation target page to its display name + Status (ENG-1933 AC4).
+
+    Notion's database-query response only ever returns a relation target's
+    page ID, never its own properties — the scoring prompt previously only
+    learned *that* a project was linked, never *which*, so a task on an
+    active flagship project and one on a dormant 2019 project were
+    indistinguishable to the model. Fetches each unique target page once
+    (cached per run — most tasks share a handful of active projects) via
+    the existing fetch_page_metadata GET, and reads its title property plus
+    a property literally named "Status" (case-insensitive; supports both
+    the Notion `status` type and a plain `select`).
+    """
+    if cache is not None and page_id in cache:
+        return cache[page_id]
+
+    name, status = "", ""
+    try:
+        page = fetch_page_metadata(page_id, headers, session)
+        properties = page.get("properties", {})
+        for prop_name, prop in properties.items():
+            if prop.get("type") == "title":
+                name = extract_text_from_rich_text(prop.get("title", []))
+            elif prop_name.strip().lower() == "status":
+                if prop.get("type") == "status" and prop.get("status"):
+                    status = prop["status"].get("name", "")
+                elif prop.get("type") == "select" and prop.get("select"):
+                    status = prop["select"].get("name", "")
+    except Exception as e:
+        print(f"  Warning: could not resolve project relation {page_id}: {e}")
+
+    result = (name, status)
+    if cache is not None:
+        cache[page_id] = result
+    return result
+
+
+def extract_task_info(task, headers=None, session=None, project_cache=None):
     """
     Extract relevant information from a task for scoring.
+
+    `headers`/`session`/`project_cache` are optional — when supplied, a
+    Project relation is resolved to its name + Status via
+    resolve_project_relation (ENG-1933 AC4); when absent (e.g. direct unit
+    tests exercising this function in isolation), a relation falls back to
+    the prior placeholder text rather than making a network call.
 
     Returns a dict with task details.
     """
@@ -1038,7 +1082,18 @@ def extract_task_info(task):
     project_prop = properties.get("Project", properties.get("Projects", {}))
     if project_prop.get("type") == "relation":
         relations = project_prop.get("relation", [])
-        if relations:
+        if relations and headers is not None:
+            resolved = []
+            for rel in relations:
+                rel_id = rel.get("id")
+                if not rel_id:
+                    continue
+                name, status = resolve_project_relation(rel_id, headers, session, project_cache)
+                if name:
+                    resolved.append(f"{name} ({status})" if status else name)
+            task_info["project"] = "; ".join(resolved) if resolved else f"[Related to {len(relations)} project(s)]"
+        elif relations:
+            # No headers supplied — preserve the prior placeholder (unit-test path).
             task_info["project"] = f"[Related to {len(relations)} project(s)]"
     elif project_prop.get("type") == "select":
         select = project_prop.get("select")
@@ -1548,7 +1603,13 @@ def handler(pd: "pipedream"):  # noqa: F821
 
         # --- 5. Extract task info for scoring ---
         print("\nStep 3: Extracting task information...")
-        task_infos = [extract_task_info(task) for task in tasks]
+        # ENG-1933 AC4: resolve Project relations to name+Status; cached per
+        # run since most tasks share a handful of active projects.
+        project_cache = {}
+        task_infos = [
+            extract_task_info(task, notion_headers, notion_session, project_cache)
+            for task in tasks
+        ]
 
         # --- 6. Score tasks in parallel batches ---
         print(f"\nStep 4: Scoring tasks in parallel batches of {BATCH_SIZE}...")
