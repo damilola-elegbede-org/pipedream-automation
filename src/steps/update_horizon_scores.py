@@ -1258,9 +1258,15 @@ IMPORTANT: Return ONLY the JSON array, no other text."""
             # silently misscore on a missing field (bool(None) == False,
             # masking the omission) or a truthy non-bool like the string
             # "false" (bool("false") == True, adding an unintended boost).
+            # `align` must be numeric and NOT a bool — bool is a subclass
+            # of int in Python, so an unguarded isinstance(align, (int,
+            # float)) would accept True/False and int(True) would silently
+            # score it as 1 instead of failing loudly.
             if (
                 cls not in ("action", "reading", "waiting")
                 or align is None
+                or isinstance(align, bool)
+                or not isinstance(align, (int, float))
                 or not isinstance(unblocks, bool)
                 or not isinstance(expiring, bool)
             ):
@@ -1637,7 +1643,12 @@ def handler(pd: "pipedream"):  # noqa: F821
             delta_count = len(tasks)
             backlog_count = 0
             pd.state["last_full_scan_at"] = now_iso
-            pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
+            # scoring_formula_version is intentionally NOT set here — see
+            # section 8 below. Committing it before every task is actually
+            # updated would let a scoring failure or a partial (<20%) Notion
+            # update failure mark the migration complete while some tasks
+            # are still on the old formula, with no future run to catch
+            # them (Codex pre-PR finding, ENG-1756).
             print(f"  Found {len(tasks)} tasks (full scan)")
         else:
             # Incremental path: delta + unscored backlog
@@ -1669,6 +1680,10 @@ def handler(pd: "pipedream"):  # noqa: F821
 
         if not tasks:
             pd.state["last_run_at"] = now_iso
+            if scan_type == "full":
+                # Empty full scan is a trivially clean migration — nothing
+                # existed to carry the old formula.
+                pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
             return {
                 "status": "Completed",
                 "message": "No tasks found matching filter criteria",
@@ -1717,6 +1732,17 @@ def handler(pd: "pipedream"):  # noqa: F821
 
     # --- 8. Write state and return summary ---
     pd.state["last_run_at"] = now_iso
+
+    # Only a full scan that updated every task with zero errors counts as a
+    # complete migration to the new scoring formula — a scoring failure or
+    # even a single Notion update failure (<20% threshold, so it wouldn't
+    # have raised) could leave some tasks still on the old formula, and
+    # they won't be revisited by a future incremental run. Leaving the
+    # version marker unset/stale here means the NEXT run's version check
+    # forces another full rescan instead of silently accepting a partial
+    # migration as done (Codex pre-PR finding, ENG-1756).
+    if scan_type == "full" and not errors:
+        pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
 
     status = "Completed" if not errors else "Partial"
     print("\n--- Processing Complete ---")

@@ -432,6 +432,31 @@ class TestScoreTasksBatch:
             score_tasks_batch(tasks, "test rubric", "test_key")
 
     @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_boolean_align(self, mock_claude):
+        """align=True is a subclass-of-int bool — int(True) == 1 would silently
+        misscore instead of failing loudly; must be rejected as malformed."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": true, "unblocks": false, "expiring": false}
+        ]'''
+
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
+
+        with pytest.raises(HorizonScoringError, match="Malformed scoring entry"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_stringly_typed_align(self, mock_claude):
+        """A non-numeric align (e.g. a string) must fail loudly, not coerce."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": "high", "unblocks": false, "expiring": false}
+        ]'''
+
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
+
+        with pytest.raises(HorizonScoringError, match="Malformed scoring entry"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
     def test_gate_then_rank_applied_end_to_end(self, mock_claude):
         """Reading-class entries are hard-capped even with a high align score."""
         mock_claude.return_value = '''[
@@ -959,6 +984,44 @@ class TestIncrementalQueries:
             result = handler(mock_pd)
 
             assert result["scan_type"] == "incremental"
+
+    @patch('steps.update_horizon_scores.update_scores_parallel')
+    @patch('steps.update_horizon_scores.score_all_batches_parallel')
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_version_migration_not_committed_on_partial_update_errors(
+        self, mock_meta, mock_query, mock_score_all, mock_update_all, mock_pd
+    ):
+        """A version-triggered full scan with SOME (sub-20%, non-raising) Notion
+        update failures must NOT commit scoring_formula_version — those tasks
+        are still on the old formula and won't be revisited by a future
+        incremental run, so the next run must retry the full scan (Codex
+        pre-PR finding, ENG-1756)."""
+        recent_iso = "2024-06-01T00:00:00.000Z"
+        with patch.dict(os.environ, self.ENV, clear=True):
+            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.state["rubric_cache"] = "Cached rubric"
+            mock_pd.state["last_run_at"] = recent_iso
+            mock_pd.state["last_full_scan_at"] = recent_iso
+            mock_pd.state["scoring_formula_version"] = 1  # stale — forces full scan
+
+            mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
+            mock_query.return_value = [
+                {"id": "t1", "properties": {"Task name": {"type": "title", "title": [{"plain_text": "T1"}]}}}
+            ]
+            mock_score_all.return_value = [{"task_id": "t1", "score": 70, "reasoning": "ok"}]
+            # One failed update, under the 20% raise threshold for a larger batch —
+            # update_scores_parallel returns normally with a non-empty errors list.
+            mock_update_all.return_value = (
+                [],
+                [{"task_id": "t1", "error": "Failed to update Notion"}],
+            )
+
+            result = handler(mock_pd)
+
+            assert result["scan_type"] == "full"
+            assert result["status"] == "Partial"
+            assert mock_pd.state["scoring_formula_version"] == 1  # unchanged — retry next run
 
     @patch('steps.update_horizon_scores.update_scores_parallel')
     @patch('steps.update_horizon_scores.score_all_batches_parallel')
