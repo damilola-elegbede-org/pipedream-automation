@@ -33,7 +33,7 @@ class HorizonScoringError(Exception):
 NOTION_API_VERSION = "2022-06-28"
 CLAUDE_MODEL = "claude-opus-5"
 # Bump whenever the scoring FORMULA changes (not the model or rubric text).
-# A mismatch against pd.state["scoring_formula_version"] forces a full
+# A mismatch against state["scoring_formula_version"] forces a full
 # rescan (ENG-1756) — otherwise the incremental path only rescoring
 # edited/unscored tasks would leave one database ranked by two
 # incompatible scoring systems for up to 30 days (Codex pre-PR finding).
@@ -50,6 +50,59 @@ BLOCK_DELETE_WORKERS = 5  # Parallel block deletions
 # --- API Endpoints ---
 NOTION_API_BASE = "https://api.notion.com/v1"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+
+
+class StateAdapter:
+    """Provide safe state backed by a Pipedream Data Store when one is wired."""
+
+    def __init__(self, pd: Any) -> None:
+        self._fallback: Dict[str, Any] = {}
+        self._data_store: Any = None
+        self._warned = False
+
+        try:
+            inputs = getattr(pd, "inputs", None)
+            if inputs is not None and "data_store" in inputs:
+                self._data_store = inputs["data_store"]
+            else:
+                self._degrade("no Data Store is wired")
+        except Exception as e:
+            self._degrade(f"Data Store setup failed: {e}")
+
+    def _degrade(self, reason: str) -> None:
+        """Switch to per-run memory and issue the one required warning."""
+        self._data_store = None
+        if not self._warned:
+            print(
+                "Warning: Persistent state unavailable "
+                f"({reason}); continuing with in-memory state. last_run_at and "
+                "last_full_scan_at will be None on each run, so this performs a "
+                "full scan and regenerates the rubric every run (more Claude calls)."
+            )
+            self._warned = True
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if self._data_store is None:
+            return self._fallback.get(key, default)
+        try:
+            # Single-argument .get — Pipedream's Data Store proxy documents
+            # `data_store.get("key")` and is not guaranteed to accept a default.
+            # Passing one would raise TypeError on every read and degrade the
+            # run permanently while looking like a Data Store outage.
+            value = self._data_store.get(key)
+            return default if value is None else value
+        except Exception as e:
+            self._degrade(f"Data Store read failed: {e}")
+            return self._fallback.get(key, default)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if self._data_store is not None:
+            try:
+                self._data_store[key] = value
+                return
+            except Exception as e:
+                self._degrade(f"Data Store write failed: {e}")
+        self._fallback[key] = value
 
 
 def retry_with_backoff(request_func, max_retries=5):
@@ -1473,7 +1526,7 @@ def update_scores_parallel(scores, headers, session=None):
 def handler(pd: "pipedream"):  # noqa: F821
     """Main entry point for Pipedream step.
 
-    Supports incremental scoring via pd.state persistence:
+    Supports incremental scoring via Data Store-backed state persistence:
     - Caches rubric and only regenerates when Horizons page changes
     - Delta queries for recently-edited tasks + unscored backlog
     - Monthly full scan for drift detection
@@ -1522,6 +1575,7 @@ def handler(pd: "pipedream"):  # noqa: F821
     delta_count = 0
     backlog_count = 0
     now_iso = datetime.now(timezone.utc).isoformat()
+    state = StateAdapter(pd)
 
     try:
         # --- 3. Rubric decision (cheap metadata check) ---
@@ -1529,8 +1583,8 @@ def handler(pd: "pipedream"):  # noqa: F821
         page_meta = fetch_page_metadata(horizons_page_id, notion_headers, notion_session)
         current_edited_at = page_meta.get("last_edited_time")
 
-        cached_edited_at = pd.state.get("horizons_last_edited_at")
-        cached_rubric = pd.state.get("rubric_cache")
+        cached_edited_at = state.get("horizons_last_edited_at")
+        cached_rubric = state.get("rubric_cache")
 
         if cached_edited_at == current_edited_at and cached_rubric:
             # Horizons unchanged and cache exists — skip block fetch + Claude rubric call
@@ -1621,13 +1675,13 @@ def handler(pd: "pipedream"):  # noqa: F821
                     print(f"  Warning: Failed to save rubric to Notion: {e}")
 
             # Update rubric cache in state
-            pd.state["horizons_last_edited_at"] = current_edited_at
-            pd.state["rubric_cache"] = rubric
+            state["horizons_last_edited_at"] = current_edited_at
+            state["rubric_cache"] = rubric
 
         # --- 4. Task query decision ---
-        last_run_at = pd.state.get("last_run_at")
-        last_full_scan_at = pd.state.get("last_full_scan_at")
-        stored_scoring_version = pd.state.get("scoring_formula_version")
+        last_run_at = state.get("last_run_at")
+        last_full_scan_at = state.get("last_full_scan_at")
+        stored_scoring_version = state.get("scoring_formula_version")
 
         # Determine if full scan is needed
         needs_full_scan = False
@@ -1660,7 +1714,7 @@ def handler(pd: "pipedream"):  # noqa: F821
             tasks = query_tasks(database_id, notion_headers, notion_session)
             delta_count = len(tasks)
             backlog_count = 0
-            pd.state["last_full_scan_at"] = now_iso
+            state["last_full_scan_at"] = now_iso
             # scoring_formula_version is intentionally NOT set here — see
             # section 8 below. Committing it before every task is actually
             # updated would let a scoring failure or a partial (<20%) Notion
@@ -1697,11 +1751,11 @@ def handler(pd: "pipedream"):  # noqa: F821
             print(f"  Delta: {delta_count} tasks | Unscored backlog: {backlog_count} tasks | Union after dedup: {len(tasks)} tasks")  # noqa: E501
 
         if not tasks:
-            pd.state["last_run_at"] = now_iso
+            state["last_run_at"] = now_iso
             if scan_type == "full":
                 # Empty full scan is a trivially clean migration — nothing
                 # existed to carry the old formula.
-                pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
+                state["scoring_formula_version"] = SCORING_FORMULA_VERSION
             return {
                 "status": "Completed",
                 "message": "No tasks found matching filter criteria",
@@ -1749,7 +1803,7 @@ def handler(pd: "pipedream"):  # noqa: F821
         anthropic_session.close()
 
     # --- 8. Write state and return summary ---
-    pd.state["last_run_at"] = now_iso
+    state["last_run_at"] = now_iso
 
     # Only a full scan that updated every task with zero errors counts as a
     # complete migration to the new scoring formula — a scoring failure or
@@ -1760,7 +1814,7 @@ def handler(pd: "pipedream"):  # noqa: F821
     # forces another full rescan instead of silently accepting a partial
     # migration as done (Codex pre-PR finding, ENG-1756).
     if scan_type == "full" and not errors:
-        pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
+        state["scoring_formula_version"] = SCORING_FORMULA_VERSION
 
     status = "Completed" if not errors else "Partial"
     print("\n--- Processing Complete ---")

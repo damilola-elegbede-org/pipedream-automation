@@ -257,6 +257,131 @@ class TestHandler:
             assert "ANTHROPIC_API_KEY" in str(exc_info.value)
 
 
+class TestStateAdapterHandler:
+    """Handler coverage for Pipedream Data Store state access."""
+
+    ENV = {
+        "NOTION_API_TOKEN": "test_token",
+        "NOTION_DATABASE_ID": "test_db",
+        "NOTION_HORIZONS_PAGE_ID": "test_page",
+        "ANTHROPIC_API_KEY": "test_key",
+    }
+
+    @staticmethod
+    def _configure_first_run(mock_meta, mock_parse, mock_blocks, mock_rubric, mock_query):
+        mock_meta.return_value = {"last_edited_time": "2024-06-01T12:00:00.000Z"}
+        mock_blocks.return_value = [{"type": "paragraph", "paragraph": {"rich_text": []}}]
+        mock_parse.return_value = "Purpose: Be awesome"
+        mock_rubric.return_value = "Fresh rubric"
+        mock_query.return_value = []
+
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.generate_rubric')
+    @patch('steps.update_horizon_scores.fetch_page_blocks')
+    @patch('steps.update_horizon_scores.parse_blocks_to_text')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_without_runtime_state_or_inputs_completes_full_scan(
+        self, mock_meta, mock_parse, mock_blocks, mock_rubric, mock_query, capsys
+    ):
+        class BarePipedream:
+            pass
+
+        self._configure_first_run(mock_meta, mock_parse, mock_blocks, mock_rubric, mock_query)
+        with patch.dict(os.environ, self.ENV, clear=True):
+            result = handler(BarePipedream())
+
+        assert result["status"] == "Completed"
+        assert result["scan_type"] == "full"
+        mock_query.assert_called_once()
+        assert capsys.readouterr().out.count("Warning: Persistent state unavailable") == 1
+
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.generate_rubric')
+    @patch('steps.update_horizon_scores.fetch_page_blocks')
+    @patch('steps.update_horizon_scores.parse_blocks_to_text')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_wired_data_store_receives_reads_and_writes(
+        self, mock_meta, mock_parse, mock_blocks, mock_rubric, mock_query, mock_pd
+    ):
+        class TrackingDataStore(dict):
+            def __init__(self):
+                super().__init__()
+                self.read_keys = []
+                self.write_keys = []
+
+            def get(self, key, default=None):
+                self.read_keys.append(key)
+                return super().get(key, default)
+
+            def __setitem__(self, key, value):
+                self.write_keys.append(key)
+                super().__setitem__(key, value)
+
+        data_store = TrackingDataStore()
+        mock_pd.inputs["data_store"] = data_store
+        self._configure_first_run(mock_meta, mock_parse, mock_blocks, mock_rubric, mock_query)
+        with patch.dict(os.environ, self.ENV, clear=True):
+            result = handler(mock_pd)
+
+        assert result["scan_type"] == "full"
+        assert "horizons_last_edited_at" in data_store.read_keys
+        assert "last_run_at" in data_store.read_keys
+        assert "rubric_cache" in data_store.write_keys
+        assert "last_run_at" in data_store.write_keys
+
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.generate_rubric')
+    @patch('steps.update_horizon_scores.fetch_page_blocks')
+    @patch('steps.update_horizon_scores.parse_blocks_to_text')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_failing_data_store_read_degrades_without_failing_run(
+        self, mock_meta, mock_parse, mock_blocks, mock_rubric, mock_query, mock_pd, capsys
+    ):
+        class FailingDataStore(dict):
+            def get(self, key, default=None):
+                raise RuntimeError("Data Store unavailable")
+
+        data_store = FailingDataStore()
+        mock_pd.inputs["data_store"] = data_store
+        self._configure_first_run(mock_meta, mock_parse, mock_blocks, mock_rubric, mock_query)
+        with patch.dict(os.environ, self.ENV, clear=True):
+            result = handler(mock_pd)
+
+        assert result["status"] == "Completed"
+        assert result["scan_type"] == "full"
+        assert not data_store
+        assert capsys.readouterr().out.count("Warning: Persistent state unavailable") == 1
+
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.generate_rubric')
+    @patch('steps.update_horizon_scores.fetch_page_blocks')
+    @patch('steps.update_horizon_scores.parse_blocks_to_text')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_failing_data_store_write_degrades_without_failing_run(
+        self, mock_meta, mock_parse, mock_blocks, mock_rubric, mock_query, mock_pd, capsys
+    ):
+        class FailingWriteDataStore(dict):
+            def __init__(self):
+                super().__init__()
+                self.write_attempts = 0
+
+            def __setitem__(self, key, value):
+                self.write_attempts += 1
+                raise RuntimeError("Data Store write failed")
+
+        data_store = FailingWriteDataStore()
+        mock_pd.inputs["data_store"] = data_store
+        self._configure_first_run(mock_meta, mock_parse, mock_blocks, mock_rubric, mock_query)
+        with patch.dict(os.environ, self.ENV, clear=True):
+            result = handler(mock_pd)
+
+        assert result["status"] == "Completed"
+        assert result["scan_type"] == "full"
+        assert not data_store
+        assert data_store.write_attempts == 1
+        assert capsys.readouterr().out.count("Warning: Persistent state unavailable") == 1
+
+
 class TestCallClaude:
     """Tests for the call_claude function."""
 
@@ -844,9 +969,9 @@ class TestRubricCaching:
         """When horizons haven't changed and cache exists, skip block fetch + rubric generation."""
         with patch.dict(os.environ, self.ENV, clear=True):
             # Pre-populate state as if a prior run succeeded
-            mock_pd.state["horizons_last_edited_at"] = "2024-06-01T12:00:00.000Z"
-            mock_pd.state["rubric_cache"] = "Cached rubric text"
-            mock_pd.state["last_run_at"] = None  # force full scan
+            mock_pd.data_store["horizons_last_edited_at"] = "2024-06-01T12:00:00.000Z"
+            mock_pd.data_store["rubric_cache"] = "Cached rubric text"
+            mock_pd.data_store["last_run_at"] = None  # force full scan
 
             mock_meta.return_value = {"last_edited_time": "2024-06-01T12:00:00.000Z"}
             mock_query.return_value = [
@@ -877,9 +1002,9 @@ class TestRubricCaching:
     ):
         """When horizons page has a new last_edited_time, regenerate the rubric."""
         with patch.dict(os.environ, self.ENV, clear=True):
-            mock_pd.state["horizons_last_edited_at"] = "2024-06-01T12:00:00.000Z"
-            mock_pd.state["rubric_cache"] = "Old rubric"
-            mock_pd.state["last_run_at"] = None  # force full scan
+            mock_pd.data_store["horizons_last_edited_at"] = "2024-06-01T12:00:00.000Z"
+            mock_pd.data_store["rubric_cache"] = "Old rubric"
+            mock_pd.data_store["last_run_at"] = None  # force full scan
 
             # Horizons page was edited
             mock_meta.return_value = {"last_edited_time": "2024-06-15T08:00:00.000Z"}
@@ -896,8 +1021,8 @@ class TestRubricCaching:
 
             mock_gen.assert_called_once()
             assert result["rubric_source"] == "regenerated"
-            assert mock_pd.state["rubric_cache"] == "New rubric text"
-            assert mock_pd.state["horizons_last_edited_at"] == "2024-06-15T08:00:00.000Z"
+            assert mock_pd.data_store["rubric_cache"] == "New rubric text"
+            assert mock_pd.data_store["horizons_last_edited_at"] == "2024-06-15T08:00:00.000Z"
 
 
 class TestIncrementalQueries:
@@ -923,11 +1048,11 @@ class TestIncrementalQueries:
         from datetime import datetime, timezone
         recent = datetime.now(timezone.utc).isoformat()
         with patch.dict(os.environ, self.ENV, clear=True):
-            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
-            mock_pd.state["rubric_cache"] = "Cached rubric"
-            mock_pd.state["last_run_at"] = recent
-            mock_pd.state["last_full_scan_at"] = recent
-            mock_pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
+            mock_pd.data_store["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.data_store["rubric_cache"] = "Cached rubric"
+            mock_pd.data_store["last_run_at"] = recent
+            mock_pd.data_store["last_full_scan_at"] = recent
+            mock_pd.data_store["scoring_formula_version"] = SCORING_FORMULA_VERSION
 
             mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
 
@@ -969,11 +1094,11 @@ class TestIncrementalQueries:
     ):
         """Full scan triggered when last_full_scan_at is >30 days ago."""
         with patch.dict(os.environ, self.ENV, clear=True):
-            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
-            mock_pd.state["rubric_cache"] = "Cached rubric"
-            mock_pd.state["last_run_at"] = "2024-06-01T00:00:00.000Z"
+            mock_pd.data_store["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.data_store["rubric_cache"] = "Cached rubric"
+            mock_pd.data_store["last_run_at"] = "2024-06-01T00:00:00.000Z"
             # Last full scan was 60 days ago
-            mock_pd.state["last_full_scan_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.data_store["last_full_scan_at"] = "2024-01-01T00:00:00.000Z"
 
             mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
             mock_query.return_value = [
@@ -986,7 +1111,7 @@ class TestIncrementalQueries:
 
             assert result["scan_type"] == "full"
             mock_query.assert_called_once()
-            assert mock_pd.state["last_full_scan_at"] is not None
+            assert mock_pd.data_store["last_full_scan_at"] is not None
 
     @patch('steps.update_horizon_scores.update_scores_parallel')
     @patch('steps.update_horizon_scores.score_all_batches_parallel')
@@ -1001,11 +1126,11 @@ class TestIncrementalQueries:
         from datetime import datetime, timezone
         recent = datetime.now(timezone.utc).isoformat()
         with patch.dict(os.environ, self.ENV, clear=True):
-            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
-            mock_pd.state["rubric_cache"] = "Cached rubric"
-            mock_pd.state["last_run_at"] = recent
-            mock_pd.state["last_full_scan_at"] = recent  # fresh — would normally stay incremental
-            mock_pd.state["scoring_formula_version"] = 1  # stale — deployed formula is v2
+            mock_pd.data_store["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.data_store["rubric_cache"] = "Cached rubric"
+            mock_pd.data_store["last_run_at"] = recent
+            mock_pd.data_store["last_full_scan_at"] = recent  # fresh — would normally stay incremental
+            mock_pd.data_store["scoring_formula_version"] = 1  # stale — deployed formula is v2
 
             mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
             mock_query.return_value = [
@@ -1018,7 +1143,7 @@ class TestIncrementalQueries:
 
             assert result["scan_type"] == "full"
             mock_query.assert_called_once()
-            assert mock_pd.state["scoring_formula_version"] == SCORING_FORMULA_VERSION
+            assert mock_pd.data_store["scoring_formula_version"] == SCORING_FORMULA_VERSION
 
     @patch('steps.update_horizon_scores.update_scores_parallel')
     @patch('steps.update_horizon_scores.score_all_batches_parallel')
@@ -1032,11 +1157,11 @@ class TestIncrementalQueries:
         from datetime import datetime, timezone
         recent = datetime.now(timezone.utc).isoformat()
         with patch.dict(os.environ, self.ENV, clear=True):
-            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
-            mock_pd.state["rubric_cache"] = "Cached rubric"
-            mock_pd.state["last_run_at"] = recent
-            mock_pd.state["last_full_scan_at"] = recent
-            mock_pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
+            mock_pd.data_store["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.data_store["rubric_cache"] = "Cached rubric"
+            mock_pd.data_store["last_run_at"] = recent
+            mock_pd.data_store["last_full_scan_at"] = recent
+            mock_pd.data_store["scoring_formula_version"] = SCORING_FORMULA_VERSION
 
             mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
             mock_delta.return_value = []
@@ -1060,11 +1185,11 @@ class TestIncrementalQueries:
         pre-PR finding, ENG-1756)."""
         recent_iso = "2024-06-01T00:00:00.000Z"
         with patch.dict(os.environ, self.ENV, clear=True):
-            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
-            mock_pd.state["rubric_cache"] = "Cached rubric"
-            mock_pd.state["last_run_at"] = recent_iso
-            mock_pd.state["last_full_scan_at"] = recent_iso
-            mock_pd.state["scoring_formula_version"] = 1  # stale — forces full scan
+            mock_pd.data_store["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.data_store["rubric_cache"] = "Cached rubric"
+            mock_pd.data_store["last_run_at"] = recent_iso
+            mock_pd.data_store["last_full_scan_at"] = recent_iso
+            mock_pd.data_store["scoring_formula_version"] = 1  # stale — forces full scan
 
             mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
             mock_query.return_value = [
@@ -1082,7 +1207,7 @@ class TestIncrementalQueries:
 
             assert result["scan_type"] == "full"
             assert result["status"] == "Partial"
-            assert mock_pd.state["scoring_formula_version"] == 1  # unchanged — retry next run
+            assert mock_pd.data_store["scoring_formula_version"] == 1  # unchanged — retry next run
 
     @patch('steps.update_horizon_scores.update_scores_parallel')
     @patch('steps.update_horizon_scores.score_all_batches_parallel')
@@ -1115,9 +1240,9 @@ class TestIncrementalQueries:
             mock_gen.assert_called_once()
             mock_query.assert_called_once()
             # State should be populated after run
-            assert mock_pd.state["last_run_at"] is not None
-            assert mock_pd.state["rubric_cache"] == "Fresh rubric"
-            assert mock_pd.state["last_full_scan_at"] is not None
+            assert mock_pd.data_store["last_run_at"] is not None
+            assert mock_pd.data_store["rubric_cache"] == "Fresh rubric"
+            assert mock_pd.data_store["last_full_scan_at"] is not None
 
     def test_query_tasks_unscored_filter_shape(self):
         """query_tasks_unscored must include Horizon Score is_empty in the filter."""
