@@ -243,7 +243,12 @@ class TestSyncAll:
         )
         
         with patch.object(syncer, 'sync_workflow', new_callable=AsyncMock, return_value=mock_result):
-            with patch.object(syncer, 'setup_browser_interactive', new_callable=AsyncMock):
+            # These exercise sync_all's ORCHESTRATION, not login. They only
+            # passed before because the old check matched any URL containing
+            # /workflows — including an AsyncMock's auto-generated attribute.
+            # State the assumption instead of relying on that accident.
+            with patch.object(syncer, 'wait_for_login', new_callable=AsyncMock, return_value=True), \
+                 patch.object(syncer, 'setup_browser_interactive', new_callable=AsyncMock):
                 with patch.object(syncer, 'teardown_browser', new_callable=AsyncMock):
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         results = await syncer.sync_all(Path(tmp_dir), ["test_workflow"])
@@ -276,7 +281,12 @@ class TestSyncAll:
         ]
         
         with patch.object(syncer, 'sync_workflow', new_callable=AsyncMock, side_effect=mock_results):
-            with patch.object(syncer, 'setup_browser_interactive', new_callable=AsyncMock):
+            # These exercise sync_all's ORCHESTRATION, not login. They only
+            # passed before because the old check matched any URL containing
+            # /workflows — including an AsyncMock's auto-generated attribute.
+            # State the assumption instead of relying on that accident.
+            with patch.object(syncer, 'wait_for_login', new_callable=AsyncMock, return_value=True), \
+                 patch.object(syncer, 'setup_browser_interactive', new_callable=AsyncMock):
                 with patch.object(syncer, 'teardown_browser', new_callable=AsyncMock):
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         results = await syncer.sync_all(Path(tmp_dir))
@@ -291,7 +301,12 @@ class TestSyncAll:
         syncer.context = AsyncMock()
         
         with patch.object(syncer, 'sync_workflow', new_callable=AsyncMock) as mock_sync:
-            with patch.object(syncer, 'setup_browser_interactive', new_callable=AsyncMock):
+            # These exercise sync_all's ORCHESTRATION, not login. They only
+            # passed before because the old check matched any URL containing
+            # /workflows — including an AsyncMock's auto-generated attribute.
+            # State the assumption instead of relying on that accident.
+            with patch.object(syncer, 'wait_for_login', new_callable=AsyncMock, return_value=True), \
+                 patch.object(syncer, 'setup_browser_interactive', new_callable=AsyncMock):
                 with patch.object(syncer, 'teardown_browser', new_callable=AsyncMock):
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         await syncer.sync_all(Path(tmp_dir), ["test_workflow"])

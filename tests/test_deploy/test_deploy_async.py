@@ -61,6 +61,7 @@ class TestSyncerWithMockedPage:
         # Mock the page
         mock_page = AsyncMock()
         mock_page.screenshot = AsyncMock()
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.take_screenshot("test_screenshot")
@@ -77,6 +78,7 @@ class TestSyncerWithMockedPage:
 
         mock_page = AsyncMock()
         mock_page.screenshot = AsyncMock(side_effect=Exception("Screenshot failed"))
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.take_screenshot("error_test")
@@ -100,6 +102,7 @@ class TestSyncerWithMockedPage:
         mock_locator.first.click = AsyncMock()
         mock_page.locator = MagicMock(return_value=mock_locator)
 
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         await syncer.click_code_tab()
@@ -114,6 +117,7 @@ class TestSyncerWithMockedPage:
 
         mock_page = AsyncMock()
         mock_page.click = AsyncMock(side_effect=PlaywrightTimeout("timeout"))
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         # Should not raise, just log and continue
@@ -165,6 +169,7 @@ class TestUpdateCodeWithMockedPage:
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
 
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         await syncer.update_code("def handler(pd): pass")
@@ -189,6 +194,7 @@ class TestUpdateCodeWithMockedPage:
             return None
 
         mock_page.evaluate = mock_evaluate
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         with pytest.raises(CodeUpdateError, match="No visible editor"):
@@ -228,6 +234,7 @@ class TestUpdateCodeWithMockedPage:
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
 
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         test_code = "print('hello')"
@@ -250,6 +257,7 @@ class TestNavigateToWorkflow:
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
         mock_page.wait_for_selector = AsyncMock()
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         await syncer.navigate_to_workflow("test-workflow-p_abc")
@@ -264,6 +272,7 @@ class TestNavigateToWorkflow:
 
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock(side_effect=PlaywrightTimeout("timeout"))
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         with pytest.raises(NavigationError, match="Timeout"):
@@ -286,6 +295,7 @@ class TestDeployWorkflow:
         # Mock evaluate to return False for DEPLOY PENDING check (no pending)
         mock_page.evaluate = AsyncMock(return_value=False)
         mock_page.goto = AsyncMock()
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.deploy_workflow("Test Workflow")
@@ -300,6 +310,7 @@ class TestDeployWorkflow:
 
         mock_page = AsyncMock()
         mock_page.wait_for_selector = AsyncMock(side_effect=PlaywrightTimeout("timeout"))
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.deploy_workflow()
@@ -317,6 +328,7 @@ class TestWaitForSave:
 
         mock_page = AsyncMock()
         mock_page.wait_for_selector = AsyncMock()
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.wait_for_save()
@@ -330,6 +342,7 @@ class TestWaitForSave:
 
         mock_page = AsyncMock()
         mock_page.wait_for_selector = AsyncMock(side_effect=PlaywrightTimeout("timeout"))
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.wait_for_save()
@@ -366,6 +379,7 @@ class TestFindAndClickStep:
             return mock_parent_locator
 
         mock_page.locator = MagicMock(side_effect=locator_side_effect)
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         await syncer.find_and_click_step("test_step")
@@ -380,6 +394,7 @@ class TestFindAndClickStep:
 
         mock_page = AsyncMock()
         mock_page.click = AsyncMock(side_effect=PlaywrightTimeout("timeout"))
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         with pytest.raises(StepNotFoundError):
@@ -429,6 +444,7 @@ class TestWaitForLogin:
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
         mock_page.wait_for_selector = AsyncMock()  # Returns immediately (logged in)
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.wait_for_login()
@@ -446,6 +462,7 @@ class TestWaitForLogin:
         mock_page.wait_for_selector = AsyncMock(side_effect=PlaywrightTimeout("timeout"))
         # Simulate being on workflows page (logged in)
         type(mock_page).url = PropertyMock(return_value="https://pipedream.com/workflows")
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.wait_for_login()
@@ -495,6 +512,7 @@ class TestVerifyCodeUpdate:
         expected_code = "def handler_test_step(pd): pass"
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value="def handler_test_step(pd): pass")
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.verify_code_update(expected_code, "test_step")
@@ -508,6 +526,7 @@ class TestVerifyCodeUpdate:
         expected_code = "def handler_expected(pd): pass"
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value="def handler_different(pd): pass")
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.verify_code_update(expected_code, "test_step")
@@ -520,6 +539,7 @@ class TestVerifyCodeUpdate:
 
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value="")
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.verify_code_update("def handler(pd): pass", "test_step")
@@ -532,6 +552,7 @@ class TestVerifyCodeUpdate:
 
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(side_effect=Exception("Evaluation failed"))
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.verify_code_update("test code", "test_step")
@@ -659,6 +680,7 @@ class TestScreenshotAlways:
 
         mock_page = AsyncMock()
         mock_page.screenshot = AsyncMock()
+        mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
 
         result = await syncer.take_screenshot("always_test")

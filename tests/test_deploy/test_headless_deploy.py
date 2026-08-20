@@ -54,6 +54,9 @@ def test_help_documents_unattended_modes_and_exit_code():
 @pytest.mark.asyncio
 async def test_headless_authenticated_profile_launches_headless_and_deploys(deploy_config):
     page = AsyncMock()
+    # An authenticated settings page. Note the URL still says /workflows — the
+    # point of the probe is that the URL is not what decides.
+    page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
     type(page).url = "https://pipedream.com/workflows"
     manager, chromium = fake_playwright(page)
     syncer = PipedreamSyncer(deploy_config, headless=True)
@@ -87,18 +90,20 @@ async def test_default_mode_remains_headed_and_uses_interactive_login(deploy_con
 
 @pytest.mark.asyncio
 async def test_default_mode_falls_back_to_interactive_login_wait(deploy_config):
-    syncer = PipedreamSyncer(deploy_config)
+    # A signed-out probe must send the human to /login and then WAIT, not
+    # declare success. login_timeout is squeezed so the wait exits promptly.
+    syncer = PipedreamSyncer(deploy_config, login_timeout_sec=2)
     page = AsyncMock()
     page.goto = AsyncMock()
-    page.wait_for_selector = AsyncMock(
-        side_effect=[PlaywrightTimeout("not logged in"), None]
-    )
+    page.inner_text = AsyncMock(return_value="Sign up Start for free")
+    page.is_closed = MagicMock(return_value=False)
     type(page).url = "https://pipedream.com/"
     syncer.page = page
+    syncer.context = MagicMock(pages=[page])
 
-    assert await syncer.wait_for_login() is True
-    assert page.goto.call_count == 2
-    assert page.goto.call_args_list[1].args[0].endswith("/login")
+    assert await syncer.wait_for_login() is False
+    visited = [c.args[0] for c in page.goto.call_args_list]
+    assert any(u.endswith("/login") for u in visited)
 
 
 @pytest.mark.asyncio
@@ -106,7 +111,7 @@ async def test_headless_unseeded_profile_fails_immediately_with_seeding_command(
     syncer = PipedreamSyncer(deploy_config, headless=True)
     page = AsyncMock()
     page.goto = AsyncMock()
-    page.wait_for_selector = AsyncMock(side_effect=PlaywrightTimeout("not logged in"))
+    page.inner_text = AsyncMock(return_value="Sign up Start for free")
     type(page).url = "https://pipedream.com/"
     syncer.page = page
 
@@ -114,7 +119,7 @@ async def test_headless_unseeded_profile_fails_immediately_with_seeding_command(
     with pytest.raises(HeadlessAuthenticationError, match="--seed-login"):
         await syncer.wait_for_login()
     assert time.monotonic() - started < 10
-    assert page.goto.call_count == 1
+    assert page.goto.call_count <= 2  # base URL + the auth probe
 
 
 @pytest.mark.asyncio
@@ -123,7 +128,7 @@ async def test_main_returns_distinct_exit_code_for_unseeded_headless_profile(
 ):
     config_file = tmp_path / "config.yaml"
     config_file.write_text("workflows: {}\n")
-    args = argparse.Namespace(
+    args = argparse.Namespace(login_timeout=7200, 
         config=str(config_file), workflow=None, dry_run=False, verbose=False,
         screenshot_always=False, base_path=None, headless=True, seed_login=False,
     )
@@ -162,7 +167,7 @@ async def test_preflight_lists_all_missing_workflow_ids_before_browser(tmp_path,
         "  first: {id: '${PIPEDREAM_WORKFLOW_FIRST}'}\n"
         "  second: {id: '${PIPEDREAM_WORKFLOW_SECOND}'}\n"
     )
-    args = argparse.Namespace(
+    args = argparse.Namespace(login_timeout=7200, 
         config=str(config_file), workflow=None, dry_run=False, verbose=False,
         screenshot_always=False, base_path=None, headless=False, seed_login=False,
     )
@@ -177,3 +182,45 @@ async def test_preflight_lists_all_missing_workflow_ids_before_browser(tmp_path,
     assert "PIPEDREAM_WORKFLOW_FIRST" in output
     assert "PIPEDREAM_WORKFLOW_SECOND" in output
     browser.assert_not_called()
+
+
+class TestAuthProbeIsContentBased:
+    """pipedream.com/workflows is a MARKETING page.
+
+    It renders the title "Workflows" and a URL containing /workflows whether or
+    not you have a session. The old check keyed off exactly that, so --seed-login
+    declared success against a logged-out browser and closed the window on a
+    human who had not logged in yet. These pin the decision to page CONTENT.
+    """
+
+    @staticmethod
+    def _syncer(body_text):
+        cfg = DeployConfig(version="1.0", pipedream_base_url="https://pipedream.com",
+                           pipedream_username="u", pipedream_project_id="p",
+                           workflows={}, settings=DeploySettings())
+        s = PipedreamSyncer(cfg, headless=True)
+        page = MagicMock()
+        page.goto = AsyncMock()
+        page.inner_text = AsyncMock(return_value=body_text)
+        page.url = "https://pipedream.com/workflows"   # the deceptive part
+        s.page = page
+        return s
+
+    @pytest.mark.asyncio
+    async def test_marketing_page_is_not_a_session(self):
+        marketing = ("Pipedream has joined Workday Sign in Sign up "
+                     "Connect apps, databases, and more Start for free")
+        assert await self._syncer(marketing)._is_authenticated() is False
+
+    @pytest.mark.asyncio
+    async def test_authenticated_settings_page_is_a_session(self):
+        real = ("Workspace settings General Membership Authentication "
+                "Environment Variables API Billing and Usage")
+        assert await self._syncer(real)._is_authenticated() is True
+
+    @pytest.mark.asyncio
+    async def test_probe_targets_an_authenticated_route_not_the_marketing_one(self):
+        s = self._syncer("Workspace settings")
+        await s._is_authenticated()
+        assert "/workflows" not in s.page.goto.call_args[0][0]
+        assert s.AUTH_PROBE_URL in s.page.goto.call_args[0][0]
