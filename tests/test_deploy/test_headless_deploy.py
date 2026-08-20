@@ -224,3 +224,20 @@ class TestAuthProbeIsContentBased:
         await s._is_authenticated()
         assert "/workflows" not in s.page.goto.call_args[0][0]
         assert s.AUTH_PROBE_URL in s.page.goto.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_unreadable_body_is_not_a_session(self):
+        s = self._syncer(None)
+        assert await s._is_authenticated() is False
+
+    @pytest.mark.asyncio
+    async def test_inner_text_failure_is_not_a_session(self):
+        s = self._syncer("unused")
+        s.page.inner_text = AsyncMock(side_effect=RuntimeError("boom"))
+        assert await s._is_authenticated() is False
+
+    @pytest.mark.asyncio
+    async def test_goto_failure_is_not_a_session(self):
+        s = self._syncer("unused")
+        s.page.goto = AsyncMock(side_effect=RuntimeError("boom"))
+        assert await s._is_authenticated() is False

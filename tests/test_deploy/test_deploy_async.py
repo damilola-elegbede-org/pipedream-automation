@@ -452,15 +452,13 @@ class TestWaitForLogin:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_login_via_url_check(self, mock_config):
-        """Test wait_for_login detects login via URL change."""
+    async def test_login_detected_from_page_content(self, mock_config):
+        """Test wait_for_login detects login from authenticated page content."""
         syncer = PipedreamSyncer(config=mock_config, verbose=True)
 
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
-        # First call: not logged in, second call: times out but URL check passes
-        mock_page.wait_for_selector = AsyncMock(side_effect=PlaywrightTimeout("timeout"))
-        # Simulate being on workflows page (logged in)
+        # URL still says /workflows (a marketing page); content is what decides.
         type(mock_page).url = PropertyMock(return_value="https://pipedream.com/workflows")
         mock_page.inner_text = AsyncMock(return_value="Workspace settings Membership API")
         syncer.page = mock_page
