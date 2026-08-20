@@ -104,6 +104,14 @@ BROWSER_CHANNEL = os.environ.get("PIPEDREAM_BROWSER_CHANNEL", "chrome") or None
 WORKFLOW_ID_ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 
 
+def positive_int(value: str) -> int:
+    """argparse type: reject zero/negative timeouts before they reach the syncer."""
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be greater than zero, got {parsed}")
+    return parsed
+
+
 def preflight_workflow_ids(config_path: str, workflow_keys: Optional[list[str]] = None) -> list[str]:
     """Return every missing environment variable required by selected workflow IDs.
 
@@ -201,6 +209,10 @@ class PipedreamSyncer:
         self.verbose = verbose
         self.screenshot_always = screenshot_always
         self.headless = headless
+        if login_timeout_sec <= 0:
+            raise PipedreamSyncError(
+                f"login_timeout_sec must be positive, got {login_timeout_sec}"
+            )
         self.login_timeout_sec = login_timeout_sec
         self.playwright: Optional[Playwright] = None
         self.context: Optional[BrowserContext] = None
@@ -350,6 +362,7 @@ class PipedreamSyncer:
     # URL or the tab title.
     AUTH_PROBE_URL = "/settings/account"
     SIGNED_OUT_MARKERS = ("Start for free", "Sign up", "Connect apps, databases")
+    AUTHENTICATED_MARKERS = ("Workspace settings",)
 
     async def _is_authenticated(self) -> bool:
         """True only when an authenticated Pipedream page actually renders."""
@@ -371,7 +384,13 @@ class PipedreamSyncer:
             # a false "yes" here is what closed the browser on a human
             # mid-login, and it is the more expensive direction to be wrong in.
             return False
-        return not any(m in body for m in self.SIGNED_OUT_MARKERS)
+        # Absence of a signed-out marker is not proof of a session either — an
+        # empty body or an unrelated error page contains neither marker set.
+        # Require a marker that only renders on the authenticated settings page.
+        return (
+            any(m in body for m in self.AUTHENTICATED_MARKERS)
+            and not any(m in body for m in self.SIGNED_OUT_MARKERS)
+        )
 
     async def wait_for_login(self) -> bool:
         """
@@ -414,8 +433,10 @@ class PipedreamSyncer:
         max_wait = self.login_timeout_sec
         print(f"\nWaiting for login (timeout {max_wait // 60} minutes). Take your time.")
 
-        # Poll every 2 seconds. Two things this loop must survive, both of which
-        # used to close the browser out from under the human mid-login:
+        # Poll against a monotonic deadline (each probe and sleep is capped by
+        # the time remaining, so a slow probe can't blow past max_wait). Two
+        # things this loop must survive, both of which used to close the
+        # browser out from under the human mid-login:
         #
         # 1. `except PlaywrightTimeout` was too narrow. Google SSO navigates
         #    several times, and a selector query that straddles a navigation
@@ -429,9 +450,10 @@ class PipedreamSyncer:
         #    means `self.page` is not where the logged-in state appears. Check
         #    every page the context holds, and adopt whichever one landed on
         #    the dashboard so later steps drive the right tab.
-        waited = 0
+        deadline = time.monotonic() + max_wait
+        last_reported_minute = 0
 
-        while waited < max_wait:
+        while (remaining := deadline - time.monotonic()) > 0:
             try:
                 pages = [p for p in (self.context.pages if self.context else []) if not p.is_closed()]
                 if self.page and not self.page.is_closed() and self.page not in pages:
@@ -443,7 +465,14 @@ class PipedreamSyncer:
                     except Exception:
                         continue
                     original, self.page = self.page, page
-                    if await self._is_authenticated():
+                    try:
+                        authenticated = await asyncio.wait_for(
+                            self._is_authenticated(), timeout=remaining
+                        )
+                    except asyncio.TimeoutError:
+                        self.page = original
+                        break
+                    if authenticated:
                         print("\nLogin successful!")
                         return True
                     self.page = original
@@ -452,10 +481,12 @@ class PipedreamSyncer:
                 # dance is expected; tearing down here is the bug being fixed.
                 self.log(f"login poll transient: {e.__class__.__name__}", "debug")
 
-            await asyncio.sleep(2)
-            waited += 2
-            if waited % 60 == 0:
-                print(f"  Still waiting... ({waited // 60} min elapsed, browser stays open)")
+            sleep_for = min(2, max(0, deadline - time.monotonic()))
+            await asyncio.sleep(sleep_for)
+            elapsed_minutes = int(max_wait - max(0, deadline - time.monotonic())) // 60
+            if elapsed_minutes > last_reported_minute:
+                last_reported_minute = elapsed_minutes
+                print(f"  Still waiting... ({elapsed_minutes} min elapsed, browser stays open)")
 
         print("\nLogin timeout! Please try again.")
         return False
@@ -1772,7 +1803,7 @@ Exit codes:
     )
     parser.add_argument(
         "--login-timeout",
-        type=int,
+        type=positive_int,
         default=DEFAULT_LOGIN_TIMEOUT_SEC,
         metavar="SECONDS",
         help=f"how long --seed-login waits for the human to finish Google SSO (default {DEFAULT_LOGIN_TIMEOUT_SEC}s)",
