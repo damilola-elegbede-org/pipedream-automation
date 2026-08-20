@@ -31,7 +31,13 @@ class HorizonScoringError(Exception):
 
 # --- Configuration ---
 NOTION_API_VERSION = "2022-06-28"
-CLAUDE_MODEL = "claude-opus-4-5-20251101"
+CLAUDE_MODEL = "claude-opus-5"
+# Bump whenever the scoring FORMULA changes (not the model or rubric text).
+# A mismatch against pd.state["scoring_formula_version"] forces a full
+# rescan (ENG-1756) — otherwise the incremental path only rescoring
+# edited/unscored tasks would leave one database ranked by two
+# incompatible scoring systems for up to 30 days (Codex pre-PR finding).
+SCORING_FORMULA_VERSION = 2  # v1: single LLM score; v2: gate-then-rank
 BATCH_SIZE = 40  # Increased for fewer batches (was 25)
 LIST_VALUES = ["Next Actions", "Waiting For", "Someday/Maybe"]
 
@@ -796,10 +802,16 @@ def call_claude(prompt, anthropic_key, max_tokens=4096, session=None):
     )
 
     data = response.json()
-    content = data.get("content", [])
-    if content and len(content) > 0:
-        return content[0].get("text", "")
-    raise Exception(f"Unexpected Claude response format: {data}")
+    # Claude's adaptive thinking can prepend thinking/redacted_thinking
+    # blocks before the final text block, so content[0] is not reliably
+    # the answer — scan for the first non-empty text block instead.
+    for block in data.get("content", []):
+        if block.get("type") == "text" and block.get("text"):
+            return block["text"]
+    raise HorizonScoringError(
+        f"No usable text block in Claude response "
+        f"(stop_reason={data.get('stop_reason')}): {data}"
+    )
 
 
 def generate_rubric(horizons_content, anthropic_key, session=None):
@@ -1134,6 +1146,33 @@ def extract_task_info(task, headers=None, session=None, project_cache=None):
     return task_info
 
 
+def compute_gate_then_rank_score(
+    cls: str, align: float, unblocks: bool, expiring: bool
+) -> int:
+    """
+    Deterministic gate-then-rank scoring (Fable advisor ruling, 2026-08-09).
+
+    Alignment and actionability come from the same LLM call on the same
+    title, so their errors correlate — multiplying them manufactures false
+    precision. Gate on `class` first (what kind of item this is), then rank
+    within the gate using `align` plus small leverage/decay boosts computed
+    in Python, never by the LLM.
+    """
+    # int() truncates deliberately — scores are whole numbers and truncation
+    # keeps the mapping monotonic and reproducible.
+    align = max(0, min(100, int(align)))
+
+    if cls == "action":
+        return min(100, align + (10 if unblocks else 0) + (10 if expiring else 0))
+    if cls == "reading":
+        return min(align, 25)  # hard cap — reading never outranks a real action
+    if cls == "waiting":
+        return 0  # misfiled — actually waiting on someone else, re-triage separately
+    raise HorizonScoringError(
+        f"Unknown class value {cls!r} (expected action|reading|waiting)"
+    )
+
+
 def score_tasks_batch(tasks, rubric, anthropic_key, session=None):
     """
     Score a batch of tasks using Claude.
@@ -1144,7 +1183,7 @@ def score_tasks_batch(tasks, rubric, anthropic_key, session=None):
         anthropic_key: Anthropic API key
         session: Optional requests.Session for connection pooling
 
-    Returns a list of {task_id, score, reasoning} dicts.
+    Returns a list of {task_id, score, class, align, unblocks, expiring, reasoning} dicts.
     """
     # Format tasks for the prompt
     tasks_text = ""
@@ -1168,18 +1207,25 @@ SCORING RUBRIC:
 TASKS TO SCORE:
 {tasks_text}
 
-For each task, provide a score from 0-100 based on alignment with the Horizons of Focus.
-- 90-100: Directly advances a stated goal or is critical to purpose
-- 70-89: Strongly supports an area of focus or contributes to vision
-- 50-69: Moderately aligned with values or supports goals indirectly
-- 30-49: Neutral maintenance task or loosely connected
-- 0-29: Misaligned, distraction, or contrary to stated priorities
+For each task, classify and rate it along four independent dimensions. Do NOT
+combine them into a single score yourself — that happens deterministically
+afterward.
 
-Return exactly {len(tasks)} scores, one per task, in the same order as listed above.
+- "class": one of "action" (something the person DOES), "reading" (something
+  they READ/reference, not a next action), or "waiting" (misfiled — this is
+  actually waiting on someone else, not something the person can act on now).
+- "align": 0-100, how well this task aligns with the stated identity and
+  priorities in the rubric above (same meaning as before).
+- "unblocks": true if doing this task frees up other work (it has leverage —
+  other things are blocked on it). false otherwise.
+- "expiring": true if this task's value has a shelf life and decays if not
+  done soon. false if it can wait indefinitely with no loss.
+
+Return exactly {len(tasks)} entries, one per task, in the same order as listed above.
 
 Return your response as a JSON array with this exact format:
 [
-  {{"score": 85, "reasoning": "Brief explanation"}},
+  {{"class": "action", "align": 85, "unblocks": true, "expiring": false}},
   ...
 ]
 
@@ -1198,19 +1244,66 @@ IMPORTANT: Return ONLY the JSON array, no other text."""
                 f"Response was: {response_text[:500]}..."
             )
         json_str = response_text[start_idx:end_idx]
-        scores = json.loads(json_str)
+        entries = json.loads(json_str)
 
-        # Validate score count matches task count
-        if len(scores) != len(tasks):
-            print(
-                f"Warning: Score count mismatch: got {len(scores)} scores "
-                f"for {len(tasks)} tasks. Truncating to min."
+        # Validate entry count matches task count. Fewer entries than tasks
+        # means Claude silently dropped tail tasks — truncating to that
+        # short list would leave those tasks unscored with no error raised,
+        # letting SCORING_FORMULA_VERSION commit after an incomplete scan.
+        # Extra entries are still truncated; that's just a chatty response.
+        if len(entries) < len(tasks):
+            raise HorizonScoringError(
+                f"Claude returned {len(entries)} entries for {len(tasks)} "
+                f"tasks — response is incomplete."
             )
-            scores = scores[:len(tasks)]
+        if len(entries) > len(tasks):
+            print(
+                f"Warning: Entry count mismatch: got {len(entries)} entries "
+                f"for {len(tasks)} tasks. Truncating extras."
+            )
+            entries = entries[:len(tasks)]
 
-        # Inject known-good task IDs by position (never trust Claude with IDs)
-        for i, score_entry in enumerate(scores):
-            score_entry["task_id"] = tasks[i]["id"]
+        # Compute the score deterministically in Python (gate-then-rank),
+        # never trust the LLM with arithmetic or task IDs.
+        scores = []
+        for i, entry in enumerate(entries):
+            cls = entry.get("class")
+            align = entry.get("align")
+            unblocks = entry.get("unblocks")
+            expiring = entry.get("expiring")
+
+            # Require real JSON booleans — bool(entry.get(...)) would
+            # silently misscore on a missing field (bool(None) == False,
+            # masking the omission) or a truthy non-bool like the string
+            # "false" (bool("false") == True, adding an unintended boost).
+            # `align` must be numeric and NOT a bool — bool is a subclass
+            # of int in Python, so an unguarded isinstance(align, (int,
+            # float)) would accept True/False and int(True) would silently
+            # score it as 1 instead of failing loudly.
+            if (
+                cls not in ("action", "reading", "waiting")
+                or align is None
+                or isinstance(align, bool)
+                or not isinstance(align, (int, float))
+                or not isinstance(unblocks, bool)
+                or not isinstance(expiring, bool)
+            ):
+                raise HorizonScoringError(
+                    f"Malformed scoring entry at index {i}: {entry}. "
+                    f"Expected class in action|reading|waiting, a numeric align, "
+                    f"and boolean unblocks/expiring."
+                )
+
+            score = compute_gate_then_rank_score(cls, align, unblocks, expiring)
+            scores.append({
+                "task_id": tasks[i]["id"],
+                "score": score,
+                "class": cls,
+                "align": align,
+                "unblocks": unblocks,
+                "expiring": expiring,
+                "reasoning": f"class={cls} align={align} unblocks={unblocks} expiring={expiring}",
+            })
 
         return scores
     except json.JSONDecodeError as e:
@@ -1534,10 +1627,14 @@ def handler(pd: "pipedream"):  # noqa: F821
         # --- 4. Task query decision ---
         last_run_at = pd.state.get("last_run_at")
         last_full_scan_at = pd.state.get("last_full_scan_at")
+        stored_scoring_version = pd.state.get("scoring_formula_version")
 
         # Determine if full scan is needed
         needs_full_scan = False
-        if last_full_scan_at is None:
+        scoring_version_changed = stored_scoring_version != SCORING_FORMULA_VERSION
+        if scoring_version_changed:
+            needs_full_scan = True
+        elif last_full_scan_at is None:
             needs_full_scan = True
         else:
             try:
@@ -1550,7 +1647,13 @@ def handler(pd: "pipedream"):  # noqa: F821
         if needs_full_scan or last_run_at is None:
             # Full scan path
             scan_type = "full"
-            if last_run_at is None:
+            if scoring_version_changed and last_run_at is not None:
+                print(
+                    f"\nStep 2: Scoring formula version changed "
+                    f"({stored_scoring_version} -> {SCORING_FORMULA_VERSION}) — "
+                    f"forcing full rescan to avoid mixed-formula rankings"
+                )
+            elif last_run_at is None:
                 print("\nStep 2: First run — performing full scan...")
             else:
                 print("\nStep 2: Full scan triggered (monthly drift detection)")
@@ -1558,6 +1661,12 @@ def handler(pd: "pipedream"):  # noqa: F821
             delta_count = len(tasks)
             backlog_count = 0
             pd.state["last_full_scan_at"] = now_iso
+            # scoring_formula_version is intentionally NOT set here — see
+            # section 8 below. Committing it before every task is actually
+            # updated would let a scoring failure or a partial (<20%) Notion
+            # update failure mark the migration complete while some tasks
+            # are still on the old formula, with no future run to catch
+            # them (Codex pre-PR finding, ENG-1756).
             print(f"  Found {len(tasks)} tasks (full scan)")
         else:
             # Incremental path: delta + unscored backlog
@@ -1589,6 +1698,10 @@ def handler(pd: "pipedream"):  # noqa: F821
 
         if not tasks:
             pd.state["last_run_at"] = now_iso
+            if scan_type == "full":
+                # Empty full scan is a trivially clean migration — nothing
+                # existed to carry the old formula.
+                pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
             return {
                 "status": "Completed",
                 "message": "No tasks found matching filter criteria",
@@ -1637,6 +1750,17 @@ def handler(pd: "pipedream"):  # noqa: F821
 
     # --- 8. Write state and return summary ---
     pd.state["last_run_at"] = now_iso
+
+    # Only a full scan that updated every task with zero errors counts as a
+    # complete migration to the new scoring formula — a scoring failure or
+    # even a single Notion update failure (<20% threshold, so it wouldn't
+    # have raised) could leave some tasks still on the old formula, and
+    # they won't be revisited by a future incremental run. Leaving the
+    # version marker unset/stale here means the NEXT run's version check
+    # forces another full rescan instead of silently accepting a partial
+    # migration as done (Codex pre-PR finding, ENG-1756).
+    if scan_type == "full" and not errors:
+        pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
 
     status = "Completed" if not errors else "Partial"
     print("\n--- Processing Complete ---")

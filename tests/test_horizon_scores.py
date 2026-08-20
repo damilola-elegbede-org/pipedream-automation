@@ -24,6 +24,8 @@ from steps.update_horizon_scores import (  # noqa: F401
     resolve_project_relation,
     call_claude,
     score_tasks_batch,
+    compute_gate_then_rank_score,
+    SCORING_FORMULA_VERSION,
     markdown_to_notion_blocks,
     get_score_color,
     create_table_block,
@@ -262,7 +264,7 @@ class TestCallClaude:
     def test_returns_response_text(self, mock_post):
         mock_response = MagicMock()
         mock_response.json.return_value = {
-            "content": [{"text": "This is the response"}]
+            "content": [{"type": "text", "text": "This is the response"}]
         }
         mock_post.return_value = mock_response
 
@@ -273,7 +275,7 @@ class TestCallClaude:
     @patch('steps.update_horizon_scores.requests.post')
     def test_uses_correct_headers(self, mock_post):
         mock_response = MagicMock()
-        mock_response.json.return_value = {"content": [{"text": "ok"}]}
+        mock_response.json.return_value = {"content": [{"type": "text", "text": "ok"}]}
         mock_post.return_value = mock_response
 
         call_claude("Test", "my_api_key")
@@ -283,6 +285,74 @@ class TestCallClaude:
         assert headers["x-api-key"] == "my_api_key"
         assert headers["anthropic-version"] == "2023-06-01"
 
+    @patch('steps.update_horizon_scores.requests.post')
+    def test_skips_thinking_blocks_before_text(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "content": [
+                {"type": "thinking", "thinking": "internal reasoning"},
+                {"type": "text", "text": "This is the response"},
+            ]
+        }
+        mock_post.return_value = mock_response
+
+        result = call_claude("Test prompt", "test_key")
+
+        assert result == "This is the response"
+
+    @patch('steps.update_horizon_scores.requests.post')
+    def test_skips_redacted_thinking_blocks_before_text(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "content": [
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "text", "text": "This is the response"},
+            ]
+        }
+        mock_post.return_value = mock_response
+
+        result = call_claude("Test prompt", "test_key")
+
+        assert result == "This is the response"
+
+    @patch('steps.update_horizon_scores.requests.post')
+    def test_raises_on_refusal_with_no_text_block(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"content": [], "stop_reason": "refusal"}
+        mock_post.return_value = mock_response
+
+        with pytest.raises(HorizonScoringError, match="No usable text block"):
+            call_claude("Test prompt", "test_key")
+
+
+class TestComputeGateThenRankScore:
+    """Tests for the deterministic gate-then-rank scoring formula."""
+
+    def test_action_class_adds_boosts(self):
+        assert compute_gate_then_rank_score("action", 70, True, True) == 90
+        assert compute_gate_then_rank_score("action", 70, False, False) == 70
+
+    def test_action_class_caps_at_100(self):
+        assert compute_gate_then_rank_score("action", 95, True, True) == 100
+
+    def test_reading_class_hard_caps_at_25(self):
+        assert compute_gate_then_rank_score("reading", 90, True, True) == 25
+        assert compute_gate_then_rank_score("reading", 10, False, False) == 10
+
+    def test_waiting_class_always_zero(self):
+        assert compute_gate_then_rank_score("waiting", 100, True, True) == 0
+
+    def test_unknown_class_raises(self):
+        with pytest.raises(HorizonScoringError, match="Unknown class value"):
+            compute_gate_then_rank_score("bogus", 50, False, False)
+
+    def test_align_is_clamped_to_0_100(self):
+        assert compute_gate_then_rank_score("action", 150, False, False) == 100
+        assert compute_gate_then_rank_score("action", -20, False, False) == 0
+
+    def test_float_align_is_truncated(self):
+        assert compute_gate_then_rank_score("action", 85.9, False, False) == 85
+
 
 class TestScoreTasksBatch:
     """Tests for the score_tasks_batch function."""
@@ -290,8 +360,8 @@ class TestScoreTasksBatch:
     @patch('steps.update_horizon_scores.call_claude')
     def test_parses_json_response(self, mock_claude):
         mock_claude.return_value = '''[
-            {"score": 85, "reasoning": "Good alignment"},
-            {"score": 45, "reasoning": "Moderate alignment"}
+            {"class": "action", "align": 85, "unblocks": false, "expiring": false},
+            {"class": "action", "align": 45, "unblocks": false, "expiring": false}
         ]'''
 
         tasks = [
@@ -311,7 +381,7 @@ class TestScoreTasksBatch:
     def test_handles_json_with_surrounding_text(self, mock_claude):
         # Claude sometimes adds explanatory text around JSON
         mock_claude.return_value = '''Here are the scores:
-        [{"score": 75, "reasoning": "Aligned"}]
+        [{"class": "action", "align": 75, "unblocks": false, "expiring": false}]
         That's the result.'''
 
         tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
@@ -326,8 +396,8 @@ class TestScoreTasksBatch:
     def test_injects_task_ids_positionally(self, mock_claude):
         """Task IDs are injected by position, not from Claude's response."""
         mock_claude.return_value = '''[
-            {"task_id": "wrong_id", "score": 90, "reasoning": "Great"},
-            {"score": 60, "reasoning": "OK"}
+            {"task_id": "wrong_id", "class": "action", "align": 90, "unblocks": false, "expiring": false},
+            {"class": "action", "align": 60, "unblocks": false, "expiring": false}
         ]'''
 
         tasks = [
@@ -342,12 +412,12 @@ class TestScoreTasksBatch:
         assert result[1]["task_id"] == "real_id_2"
 
     @patch('steps.update_horizon_scores.call_claude')
-    def test_truncates_on_score_count_mismatch(self, mock_claude):
+    def test_truncates_extra_entries_on_score_count_mismatch(self, mock_claude):
         """Extra scores from Claude are truncated to match task count."""
         mock_claude.return_value = '''[
-            {"score": 80, "reasoning": "Good"},
-            {"score": 50, "reasoning": "OK"},
-            {"score": 30, "reasoning": "Extra"}
+            {"class": "action", "align": 80, "unblocks": false, "expiring": false},
+            {"class": "action", "align": 50, "unblocks": false, "expiring": false},
+            {"class": "action", "align": 30, "unblocks": false, "expiring": false}
         ]'''
 
         tasks = [
@@ -362,6 +432,21 @@ class TestScoreTasksBatch:
         assert result[1]["task_id"] == "task_2"
 
     @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_score_count_shortfall(self, mock_claude):
+        """Fewer entries than tasks fails loudly instead of dropping tasks."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": 80, "unblocks": false, "expiring": false}
+        ]'''
+
+        tasks = [
+            {"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},  # noqa: E501
+            {"id": "task_2", "title": "Task 2", "list": "Waiting For", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}  # noqa: E501
+        ]
+
+        with pytest.raises(HorizonScoringError, match="entries for 2 tasks"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
     def test_raises_on_invalid_json(self, mock_claude):
         """Test that invalid JSON raises HorizonScoringError (fail loudly)."""
         mock_claude.return_value = "This is not valid JSON"
@@ -370,6 +455,88 @@ class TestScoreTasksBatch:
 
         with pytest.raises(HorizonScoringError, match="No JSON array found"):
             score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_malformed_class(self, mock_claude):
+        """A missing/invalid class or align field fails loudly, not silently."""
+        mock_claude.return_value = '''[
+            {"class": "bogus", "align": 50, "unblocks": false, "expiring": false}
+        ]'''
+
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
+
+        with pytest.raises(HorizonScoringError, match="Malformed scoring entry"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_missing_boolean_field(self, mock_claude):
+        """A missing unblocks/expiring field fails loudly instead of defaulting to False."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": 50}
+        ]'''
+
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
+
+        with pytest.raises(HorizonScoringError, match="Malformed scoring entry"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_stringly_typed_boolean(self, mock_claude):
+        """The string "false" is truthy in Python — must be rejected, not coerced to True."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": 50, "unblocks": "false", "expiring": false}
+        ]'''
+
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
+
+        with pytest.raises(HorizonScoringError, match="Malformed scoring entry"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_boolean_align(self, mock_claude):
+        """align=True is a subclass-of-int bool — int(True) == 1 would silently
+        misscore instead of failing loudly; must be rejected as malformed."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": true, "unblocks": false, "expiring": false}
+        ]'''
+
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
+
+        with pytest.raises(HorizonScoringError, match="Malformed scoring entry"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_stringly_typed_align(self, mock_claude):
+        """A non-numeric align (e.g. a string) must fail loudly, not coerce."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": "high", "unblocks": false, "expiring": false}
+        ]'''
+
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
+
+        with pytest.raises(HorizonScoringError, match="Malformed scoring entry"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_gate_then_rank_applied_end_to_end(self, mock_claude):
+        """Reading-class entries are hard-capped even with a high align score."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": 70, "unblocks": true, "expiring": true},
+            {"class": "reading", "align": 96, "unblocks": false, "expiring": false},
+            {"class": "waiting", "align": 80, "unblocks": true, "expiring": true}
+        ]'''
+
+        tasks = [
+            {"id": "t1", "title": "Action", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},  # noqa: E501
+            {"id": "t2", "title": "Reading", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},  # noqa: E501
+            {"id": "t3", "title": "Waiting", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},  # noqa: E501
+        ]
+
+        result = score_tasks_batch(tasks, "test rubric", "test_key")
+
+        assert result[0]["score"] == 90  # 70 + 10 + 10
+        assert result[1]["score"] == 25  # hard-capped despite align=96
+        assert result[2]["score"] == 0   # waiting always scores 0
 
 
 class TestIntegration:
@@ -760,6 +927,7 @@ class TestIncrementalQueries:
             mock_pd.state["rubric_cache"] = "Cached rubric"
             mock_pd.state["last_run_at"] = recent
             mock_pd.state["last_full_scan_at"] = recent
+            mock_pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
 
             mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
 
@@ -819,6 +987,102 @@ class TestIncrementalQueries:
             assert result["scan_type"] == "full"
             mock_query.assert_called_once()
             assert mock_pd.state["last_full_scan_at"] is not None
+
+    @patch('steps.update_horizon_scores.update_scores_parallel')
+    @patch('steps.update_horizon_scores.score_all_batches_parallel')
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_full_scan_forced_when_scoring_formula_version_changed(
+        self, mock_meta, mock_query, mock_score_all, mock_update_all, mock_pd
+    ):
+        """A scoring-formula version bump forces a full rescan even with a fresh
+        last_full_scan_at — otherwise old- and new-formula scores would coexist
+        in the same database for up to 30 days (Codex pre-PR finding, ENG-1756)."""
+        from datetime import datetime, timezone
+        recent = datetime.now(timezone.utc).isoformat()
+        with patch.dict(os.environ, self.ENV, clear=True):
+            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.state["rubric_cache"] = "Cached rubric"
+            mock_pd.state["last_run_at"] = recent
+            mock_pd.state["last_full_scan_at"] = recent  # fresh — would normally stay incremental
+            mock_pd.state["scoring_formula_version"] = 1  # stale — deployed formula is v2
+
+            mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
+            mock_query.return_value = [
+                {"id": "t1", "properties": {"Task name": {"type": "title", "title": [{"plain_text": "T1"}]}}}
+            ]
+            mock_score_all.return_value = [{"task_id": "t1", "score": 70, "reasoning": "ok"}]
+            mock_update_all.return_value = ([{"task_id": "t1", "score": 70, "reasoning": "ok"}], [])
+
+            result = handler(mock_pd)
+
+            assert result["scan_type"] == "full"
+            mock_query.assert_called_once()
+            assert mock_pd.state["scoring_formula_version"] == SCORING_FORMULA_VERSION
+
+    @patch('steps.update_horizon_scores.update_scores_parallel')
+    @patch('steps.update_horizon_scores.score_all_batches_parallel')
+    @patch('steps.update_horizon_scores.query_tasks_unscored')
+    @patch('steps.update_horizon_scores.query_tasks_incremental')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_incremental_stays_incremental_when_scoring_version_matches(
+        self, mock_meta, mock_delta, mock_backlog, mock_score_all, mock_update_all, mock_pd
+    ):
+        """Matching scoring_formula_version takes the normal incremental path."""
+        from datetime import datetime, timezone
+        recent = datetime.now(timezone.utc).isoformat()
+        with patch.dict(os.environ, self.ENV, clear=True):
+            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.state["rubric_cache"] = "Cached rubric"
+            mock_pd.state["last_run_at"] = recent
+            mock_pd.state["last_full_scan_at"] = recent
+            mock_pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
+
+            mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
+            mock_delta.return_value = []
+            mock_backlog.return_value = []
+
+            result = handler(mock_pd)
+
+            assert result["scan_type"] == "incremental"
+
+    @patch('steps.update_horizon_scores.update_scores_parallel')
+    @patch('steps.update_horizon_scores.score_all_batches_parallel')
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_version_migration_not_committed_on_partial_update_errors(
+        self, mock_meta, mock_query, mock_score_all, mock_update_all, mock_pd
+    ):
+        """A version-triggered full scan with SOME (sub-20%, non-raising) Notion
+        update failures must NOT commit scoring_formula_version — those tasks
+        are still on the old formula and won't be revisited by a future
+        incremental run, so the next run must retry the full scan (Codex
+        pre-PR finding, ENG-1756)."""
+        recent_iso = "2024-06-01T00:00:00.000Z"
+        with patch.dict(os.environ, self.ENV, clear=True):
+            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.state["rubric_cache"] = "Cached rubric"
+            mock_pd.state["last_run_at"] = recent_iso
+            mock_pd.state["last_full_scan_at"] = recent_iso
+            mock_pd.state["scoring_formula_version"] = 1  # stale — forces full scan
+
+            mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
+            mock_query.return_value = [
+                {"id": "t1", "properties": {"Task name": {"type": "title", "title": [{"plain_text": "T1"}]}}}
+            ]
+            mock_score_all.return_value = [{"task_id": "t1", "score": 70, "reasoning": "ok"}]
+            # One failed update, under the 20% raise threshold for a larger batch —
+            # update_scores_parallel returns normally with a non-empty errors list.
+            mock_update_all.return_value = (
+                [],
+                [{"task_id": "t1", "error": "Failed to update Notion"}],
+            )
+
+            result = handler(mock_pd)
+
+            assert result["scan_type"] == "full"
+            assert result["status"] == "Partial"
+            assert mock_pd.state["scoring_formula_version"] == 1  # unchanged — retry next run
 
     @patch('steps.update_horizon_scores.update_scores_parallel')
     @patch('steps.update_horizon_scores.score_all_batches_parallel')
