@@ -13,6 +13,12 @@ class AuthenticationError(PipedreamSyncError):
     pass
 
 
+class HeadlessAuthenticationError(AuthenticationError):
+    """Raised when an unattended deploy has no seeded Pipedream session."""
+
+    pass
+
+
 class NavigationError(PipedreamSyncError):
     """Raised when navigation to a Pipedream page fails."""
 

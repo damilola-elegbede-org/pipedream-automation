@@ -16,7 +16,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime
+import os
 import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -47,6 +49,7 @@ from .config import DeployConfig, load_config, validate_config, StepConfig
 from .exceptions import (
     AuthenticationError,
     CodeUpdateError,
+    HeadlessAuthenticationError,
     NavigationError,
     PipedreamSyncError,
     SaveError,
@@ -77,6 +80,72 @@ from .utils import (  # noqa: F401
 
 # Browser profile directory for persistent sessions
 BROWSER_PROFILE_DIR = Path(".tmp/browser_profile")
+HEADLESS_AUTH_EXIT_CODE = 2
+
+# Playwright browser channel. "chrome" = the locally installed Google Chrome,
+# in its own profile directory (never the human's). Set PIPEDREAM_BROWSER_CHANNEL
+# to "" to force Playwright's bundled Chromium.
+BROWSER_CHANNEL = os.environ.get("PIPEDREAM_BROWSER_CHANNEL", "chrome") or None
+WORKFLOW_ID_ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+
+
+def preflight_workflow_ids(config_path: str, workflow_keys: Optional[list[str]] = None) -> list[str]:
+    """Return every missing environment variable required by selected workflow IDs.
+
+    This deliberately runs before ``load_config`` so one missing environment
+    variable cannot hide the rest and so no browser is ever opened for an
+    incomplete deployment configuration.
+    """
+    try:
+        import yaml
+
+        with open(config_path) as config_file:
+            raw_config = yaml.safe_load(config_file) or {}
+    except (OSError, yaml.YAMLError):
+        # Let load_config produce its established, more detailed error message.
+        return []
+
+    workflows = raw_config.get("workflows", {})
+    keys_to_check = workflow_keys or list(workflows)
+    missing_variables: list[str] = []
+    for key in keys_to_check:
+        workflow = workflows.get(key)
+        if not isinstance(workflow, dict):
+            continue
+        workflow_id = workflow.get("id", "")
+        if not isinstance(workflow_id, str):
+            continue
+        for match in WORKFLOW_ID_ENV_PATTERN.finditer(workflow_id):
+            variable, default = match.groups()
+            value = os.environ.get(variable)
+            if (not value or WORKFLOW_ID_ENV_PATTERN.search(value)) and not default:
+                missing_variables.append(variable)
+
+    return sorted(set(missing_variables))
+
+
+def assert_profile_is_safe() -> None:
+    """Refuse browser profiles that are tracked or not ignored by Git."""
+    profile = str(BROWSER_PROFILE_DIR)
+    try:
+        tracked = subprocess.run(
+            ["git", "ls-files", "--", profile],
+            check=False,
+            capture_output=True,
+            text=True,
+        ).stdout
+        ignored = subprocess.run(
+            ["git", "check-ignore", "-q", "--", profile],
+            check=False,
+            capture_output=True,
+        ).returncode == 0
+    except OSError as error:
+        raise PipedreamSyncError("Cannot verify browser profile Git hygiene") from error
+
+    if tracked or not ignored:
+        raise PipedreamSyncError(
+            "Refusing to use a browser profile that is tracked or not Git-ignored"
+        )
 
 
 @dataclass
@@ -109,11 +178,13 @@ class PipedreamSyncer:
         dry_run: bool = False,
         verbose: bool = False,
         screenshot_always: bool = False,
+        headless: bool = False,
     ):
         self.config = config
         self.dry_run = dry_run
         self.verbose = verbose
         self.screenshot_always = screenshot_always
+        self.headless = headless
         self.playwright: Optional[Playwright] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -151,15 +222,30 @@ class PipedreamSyncer:
 
         self.log("Starting browser...", "debug")
 
+        # Verify the profile cannot be accidentally committed before creating it.
+        assert_profile_is_safe()
+
         # Ensure profile directory exists
         BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
         self.playwright = await async_playwright().start()
 
-        # Use persistent context for Google SSO compatibility
-        self.context = await self.playwright.chromium.launch_persistent_context(
+        # Use persistent context for Google SSO compatibility.
+        #
+        # `channel="chrome"` drives the locally installed Google Chrome rather
+        # than Playwright's bundled Chromium. This is about the SEED LOGIN, not
+        # cosmetics: Google routinely refuses OAuth on Chromium builds with
+        # "this browser or app may not be secure", and a seed login that cannot
+        # complete makes every later --headless run exit 2 forever.
+        #
+        # It stays a SEPARATE profile directory either way. We never point at
+        # the human's own Chrome profile: Chrome holds an exclusive lock on it
+        # (so a deploy would require quitting their browser, including at 3am),
+        # and it would hand an unattended job every session that browser holds.
+        # One Pipedream login is the entire requirement.
+        launch_kwargs = dict(
             user_data_dir=str(BROWSER_PROFILE_DIR),
-            headless=False,  # Always headed for interactive login
+            headless=self.headless,
             viewport={
                 "width": self.config.settings.viewport_width,
                 "height": self.config.settings.viewport_height,
@@ -172,6 +258,23 @@ class PipedreamSyncer:
             # Grant clipboard permissions for code paste
             permissions=["clipboard-read", "clipboard-write"],
         )
+        try:
+            self.context = await self.playwright.chromium.launch_persistent_context(
+                channel=BROWSER_CHANNEL, **launch_kwargs
+            )
+        except Exception as e:
+            # Chrome absent (CI, a fresh box) — fall back rather than fail the
+            # deploy. Say which browser is actually in use: if a seed login then
+            # hits Google's block page, this line is the explanation.
+            self.log(
+                f"Chrome channel {BROWSER_CHANNEL!r} unavailable ({e.__class__.__name__}); "
+                "falling back to Playwright's bundled Chromium. Google SSO may refuse "
+                "this build during --seed-login.",
+                "warn",
+            )
+            self.context = await self.playwright.chromium.launch_persistent_context(
+                **launch_kwargs
+            )
 
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
 
@@ -246,6 +349,13 @@ class PipedreamSyncer:
             return True
         except PlaywrightTimeout:
             pass
+
+        if self.headless:
+            raise HeadlessAuthenticationError(
+                "Pipedream login is not seeded for --headless. "
+                "Run `python -m src.deploy.deploy_to_pipedream --seed-login` "
+                "once in an interactive desktop session."
+            )
 
         # Not logged in - navigate to LOGIN PAGE (not landing page!)
         # This ensures the login form is visible on fresh machines
@@ -1401,7 +1511,7 @@ class PipedreamSyncer:
         return result
 
     async def sync_all(self, base_path: Path, workflow_keys: Optional[list[str]] = None) -> list[WorkflowResult]:
-        """Sync all (or specified) workflows with interactive login.
+        """Sync all (or specified) workflows after verifying login.
 
         In dry-run mode the browser is never launched — config/script
         validation runs entirely in-process and the method returns
@@ -1437,31 +1547,52 @@ class PipedreamSyncer:
 
         return self.results
 
+    async def seed_login(self) -> None:
+        """Perform the one-time headed login without changing any workflow."""
+        try:
+            await self.setup_browser_interactive()
+            if not await self.wait_for_login():
+                raise AuthenticationError("Login failed or timed out")
+            print("\nBrowser profile seeded. Later unattended deploys can use --headless.")
+        finally:
+            await self.teardown_browser()
+
 
 async def main_async(args: argparse.Namespace) -> int:
     """Async main function."""
     # Load .env.local
     load_and_set_env_local()
 
+    # Determine workflows to sync before preflight so single-workflow deploys
+    # need only that workflow's ID environment variable.
+    workflow_keys = [args.workflow] if args.workflow else None
+
+    missing_workflow_variables = []
+    if not args.seed_login:
+        missing_workflow_variables = preflight_workflow_ids(args.config, workflow_keys)
+    if missing_workflow_variables:
+        print(
+            "ERROR: Missing workflow ID environment variables: "
+            + ", ".join(missing_workflow_variables)
+        )
+        return 1
+
     # Load configuration
     try:
-        config = load_config(args.config)
+        config = load_config(args.config, allow_missing_env=args.seed_login)
     except Exception as e:
         print(f"ERROR: Failed to load config: {e}")
         return 1
 
-    # Validate configuration
+    # Seeding only needs browser settings; it intentionally does not validate
+    # workflow IDs or scripts because it never touches a workflow.
     base_path = Path(args.base_path) if args.base_path else Path.cwd()
-    try:
-        validate_config(config, str(base_path))
-    except Exception as e:
-        print(f"ERROR: Invalid config: {e}")
-        return 1
-
-    # Determine workflows to sync
-    workflow_keys = None
-    if args.workflow:
-        workflow_keys = [args.workflow]
+    if not args.seed_login:
+        try:
+            validate_config(config, str(base_path))
+        except Exception as e:
+            print(f"ERROR: Invalid config: {e}")
+            return 1
 
     # Run sync
     syncer = PipedreamSyncer(
@@ -1469,10 +1600,17 @@ async def main_async(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         verbose=args.verbose,
         screenshot_always=args.screenshot_always,
+        headless=args.headless,
     )
 
     try:
+        if args.seed_login:
+            await syncer.seed_login()
+            return 0
         results = await syncer.sync_all(base_path, workflow_keys)
+    except HeadlessAuthenticationError as e:
+        print(f"\nERROR: Sync failed: {e}")
+        return HEADLESS_AUTH_EXIT_CODE
     except PipedreamSyncError as e:
         print(f"\nERROR: Sync failed: {e}")
         return 1
@@ -1527,8 +1665,8 @@ async def main_async(args: argparse.Namespace) -> int:
     return 0
 
 
-def main():
-    """Entry point."""
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser without starting environment setup."""
     parser = argparse.ArgumentParser(
         description="Deploy Python scripts to Pipedream workflows",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1542,9 +1680,34 @@ Examples:
 
   Dry run (validate only):
     python -m src.deploy.deploy_to_pipedream --dry-run
+
+  Seed the persistent browser login for unattended deploys:
+    python -m src.deploy.deploy_to_pipedream --seed-login
+
+Exit codes:
+  0  success
+  1  general deployment or configuration failure
+  2  --headless profile is not authenticated; run --seed-login
         """,
     )
 
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--headless",
+        action="store_true",
+        help=(
+            "Deploy using the persisted profile without waiting for login; "
+            "exits 2 if it must be seeded with --seed-login"
+        ),
+    )
+    mode.add_argument(
+        "--seed-login",
+        action="store_true",
+        help=(
+            "Open a headed browser, wait for Google SSO, then seed the "
+            "persistent profile without deploying"
+        ),
+    )
     parser.add_argument(
         "--config",
         default="config/pipedream-mapping.yaml",
@@ -1574,7 +1737,12 @@ Examples:
         help="Base path for resolving script paths (default: cwd)",
     )
 
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    """Entry point."""
+    args = build_parser().parse_args()
 
     try:
         exit_code = asyncio.run(main_async(args))
