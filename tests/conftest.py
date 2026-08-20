@@ -27,22 +27,23 @@ class MockDataStore(dict):
         return super().get(key, default)
 
 
-class MockState(dict):
-    """Mock Pipedream pd.state — a persistent dict between workflow executions."""
-
-    def get(self, key, default=None):
-        return super().get(key, default)
-
-
 class MockPipedream:
     """Mock Pipedream context object for testing handlers."""
 
     def __init__(self):
-        self.inputs = {}
         self.steps = {}
         self.flow = MockFlow()
         self.data_store = MockDataStore()
-        self.state = MockState()
+        # Wired the way a real Pipedream step with a Data Store attached is:
+        # the handler reaches it through pd.inputs["data_store"]. Tests that
+        # need the unwired case build a bare object instead.
+        self.inputs = {"data_store": self.data_store}
+        # Deliberately NO `state` attribute. Pipedream's Python runtime has
+        # none — cross-run persistence is a Data Store reached through
+        # pd.inputs["data_store"]. This fixture used to invent one, and that
+        # is why 78 tests stayed green over a handler that could not start in
+        # production, and why ENG-1756's rewrite added four MORE uses of the
+        # attribute on top of the broken ones (ENG-1953).
 
 
 @pytest.fixture
