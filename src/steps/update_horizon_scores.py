@@ -31,7 +31,7 @@ class HorizonScoringError(Exception):
 
 # --- Configuration ---
 NOTION_API_VERSION = "2022-06-28"
-CLAUDE_MODEL = "claude-opus-4-5-20251101"
+CLAUDE_MODEL = "claude-opus-5"
 BATCH_SIZE = 40  # Increased for fewer batches (was 25)
 LIST_VALUES = ["Next Actions", "Waiting For", "Someday/Maybe"]
 
@@ -1134,6 +1134,30 @@ def extract_task_info(task, headers=None, session=None, project_cache=None):
     return task_info
 
 
+def compute_gate_then_rank_score(cls, align, unblocks, expiring):
+    """
+    Deterministic gate-then-rank scoring (Fable advisor ruling, 2026-08-09).
+
+    Alignment and actionability come from the same LLM call on the same
+    title, so their errors correlate — multiplying them manufactures false
+    precision. Gate on `class` first (what kind of item this is), then rank
+    within the gate using `align` plus small leverage/decay boosts computed
+    in Python, never by the LLM.
+    """
+    align = max(0, min(100, int(align)))
+
+    if cls == "action":
+        return min(100, align + (10 if unblocks else 0) + (10 if expiring else 0))
+    elif cls == "reading":
+        return min(align, 25)  # hard cap — reading never outranks a real action
+    elif cls == "waiting":
+        return 0  # misfiled — actually waiting on someone else, re-triage separately
+    else:
+        raise HorizonScoringError(
+            f"Unknown class value {cls!r} (expected action|reading|waiting)"
+        )
+
+
 def score_tasks_batch(tasks, rubric, anthropic_key, session=None):
     """
     Score a batch of tasks using Claude.
@@ -1144,7 +1168,7 @@ def score_tasks_batch(tasks, rubric, anthropic_key, session=None):
         anthropic_key: Anthropic API key
         session: Optional requests.Session for connection pooling
 
-    Returns a list of {task_id, score, reasoning} dicts.
+    Returns a list of {task_id, score, class, align, unblocks, expiring, reasoning} dicts.
     """
     # Format tasks for the prompt
     tasks_text = ""
@@ -1168,18 +1192,25 @@ SCORING RUBRIC:
 TASKS TO SCORE:
 {tasks_text}
 
-For each task, provide a score from 0-100 based on alignment with the Horizons of Focus.
-- 90-100: Directly advances a stated goal or is critical to purpose
-- 70-89: Strongly supports an area of focus or contributes to vision
-- 50-69: Moderately aligned with values or supports goals indirectly
-- 30-49: Neutral maintenance task or loosely connected
-- 0-29: Misaligned, distraction, or contrary to stated priorities
+For each task, classify and rate it along four independent dimensions. Do NOT
+combine them into a single score yourself — that happens deterministically
+afterward.
 
-Return exactly {len(tasks)} scores, one per task, in the same order as listed above.
+- "class": one of "action" (something the person DOES), "reading" (something
+  they READ/reference, not a next action), or "waiting" (misfiled — this is
+  actually waiting on someone else, not something the person can act on now).
+- "align": 0-100, how well this task aligns with the stated identity and
+  priorities in the rubric above (same meaning as before).
+- "unblocks": true if doing this task frees up other work (it has leverage —
+  other things are blocked on it). false otherwise.
+- "expiring": true if this task's value has a shelf life and decays if not
+  done soon. false if it can wait indefinitely with no loss.
+
+Return exactly {len(tasks)} entries, one per task, in the same order as listed above.
 
 Return your response as a JSON array with this exact format:
 [
-  {{"score": 85, "reasoning": "Brief explanation"}},
+  {{"class": "action", "align": 85, "unblocks": true, "expiring": false}},
   ...
 ]
 
@@ -1198,19 +1229,41 @@ IMPORTANT: Return ONLY the JSON array, no other text."""
                 f"Response was: {response_text[:500]}..."
             )
         json_str = response_text[start_idx:end_idx]
-        scores = json.loads(json_str)
+        entries = json.loads(json_str)
 
-        # Validate score count matches task count
-        if len(scores) != len(tasks):
+        # Validate entry count matches task count
+        if len(entries) != len(tasks):
             print(
-                f"Warning: Score count mismatch: got {len(scores)} scores "
+                f"Warning: Entry count mismatch: got {len(entries)} entries "
                 f"for {len(tasks)} tasks. Truncating to min."
             )
-            scores = scores[:len(tasks)]
+            entries = entries[:len(tasks)]
 
-        # Inject known-good task IDs by position (never trust Claude with IDs)
-        for i, score_entry in enumerate(scores):
-            score_entry["task_id"] = tasks[i]["id"]
+        # Compute the score deterministically in Python (gate-then-rank),
+        # never trust the LLM with arithmetic or task IDs.
+        scores = []
+        for i, entry in enumerate(entries):
+            cls = entry.get("class")
+            align = entry.get("align")
+            unblocks = bool(entry.get("unblocks"))
+            expiring = bool(entry.get("expiring"))
+
+            if cls not in ("action", "reading", "waiting") or align is None:
+                raise HorizonScoringError(
+                    f"Malformed scoring entry at index {i}: {entry}. "
+                    f"Expected class in action|reading|waiting and a numeric align."
+                )
+
+            score = compute_gate_then_rank_score(cls, align, unblocks, expiring)
+            scores.append({
+                "task_id": tasks[i]["id"],
+                "score": score,
+                "class": cls,
+                "align": align,
+                "unblocks": unblocks,
+                "expiring": expiring,
+                "reasoning": f"class={cls} align={align} unblocks={unblocks} expiring={expiring}",
+            })
 
         return scores
     except json.JSONDecodeError as e:

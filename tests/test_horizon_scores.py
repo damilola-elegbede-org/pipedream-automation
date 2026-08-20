@@ -24,6 +24,7 @@ from steps.update_horizon_scores import (  # noqa: F401
     resolve_project_relation,
     call_claude,
     score_tasks_batch,
+    compute_gate_then_rank_score,
     markdown_to_notion_blocks,
     get_score_color,
     create_table_block,
@@ -284,14 +285,36 @@ class TestCallClaude:
         assert headers["anthropic-version"] == "2023-06-01"
 
 
+class TestComputeGateThenRankScore:
+    """Tests for the deterministic gate-then-rank scoring formula."""
+
+    def test_action_class_adds_boosts(self):
+        assert compute_gate_then_rank_score("action", 70, True, True) == 90
+        assert compute_gate_then_rank_score("action", 70, False, False) == 70
+
+    def test_action_class_caps_at_100(self):
+        assert compute_gate_then_rank_score("action", 95, True, True) == 100
+
+    def test_reading_class_hard_caps_at_25(self):
+        assert compute_gate_then_rank_score("reading", 90, True, True) == 25
+        assert compute_gate_then_rank_score("reading", 10, False, False) == 10
+
+    def test_waiting_class_always_zero(self):
+        assert compute_gate_then_rank_score("waiting", 100, True, True) == 0
+
+    def test_unknown_class_raises(self):
+        with pytest.raises(HorizonScoringError, match="Unknown class value"):
+            compute_gate_then_rank_score("bogus", 50, False, False)
+
+
 class TestScoreTasksBatch:
     """Tests for the score_tasks_batch function."""
 
     @patch('steps.update_horizon_scores.call_claude')
     def test_parses_json_response(self, mock_claude):
         mock_claude.return_value = '''[
-            {"score": 85, "reasoning": "Good alignment"},
-            {"score": 45, "reasoning": "Moderate alignment"}
+            {"class": "action", "align": 85, "unblocks": false, "expiring": false},
+            {"class": "action", "align": 45, "unblocks": false, "expiring": false}
         ]'''
 
         tasks = [
@@ -311,7 +334,7 @@ class TestScoreTasksBatch:
     def test_handles_json_with_surrounding_text(self, mock_claude):
         # Claude sometimes adds explanatory text around JSON
         mock_claude.return_value = '''Here are the scores:
-        [{"score": 75, "reasoning": "Aligned"}]
+        [{"class": "action", "align": 75, "unblocks": false, "expiring": false}]
         That's the result.'''
 
         tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
@@ -326,8 +349,8 @@ class TestScoreTasksBatch:
     def test_injects_task_ids_positionally(self, mock_claude):
         """Task IDs are injected by position, not from Claude's response."""
         mock_claude.return_value = '''[
-            {"task_id": "wrong_id", "score": 90, "reasoning": "Great"},
-            {"score": 60, "reasoning": "OK"}
+            {"task_id": "wrong_id", "class": "action", "align": 90, "unblocks": false, "expiring": false},
+            {"class": "action", "align": 60, "unblocks": false, "expiring": false}
         ]'''
 
         tasks = [
@@ -345,9 +368,9 @@ class TestScoreTasksBatch:
     def test_truncates_on_score_count_mismatch(self, mock_claude):
         """Extra scores from Claude are truncated to match task count."""
         mock_claude.return_value = '''[
-            {"score": 80, "reasoning": "Good"},
-            {"score": 50, "reasoning": "OK"},
-            {"score": 30, "reasoning": "Extra"}
+            {"class": "action", "align": 80, "unblocks": false, "expiring": false},
+            {"class": "action", "align": 50, "unblocks": false, "expiring": false},
+            {"class": "action", "align": 30, "unblocks": false, "expiring": false}
         ]'''
 
         tasks = [
@@ -370,6 +393,39 @@ class TestScoreTasksBatch:
 
         with pytest.raises(HorizonScoringError, match="No JSON array found"):
             score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_malformed_class(self, mock_claude):
+        """A missing/invalid class or align field fails loudly, not silently."""
+        mock_claude.return_value = '''[
+            {"class": "bogus", "align": 50, "unblocks": false, "expiring": false}
+        ]'''
+
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
+
+        with pytest.raises(HorizonScoringError, match="Malformed scoring entry"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_gate_then_rank_applied_end_to_end(self, mock_claude):
+        """Reading-class entries are hard-capped even with a high align score."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": 70, "unblocks": true, "expiring": true},
+            {"class": "reading", "align": 96, "unblocks": false, "expiring": false},
+            {"class": "waiting", "align": 80, "unblocks": true, "expiring": true}
+        ]'''
+
+        tasks = [
+            {"id": "t1", "title": "Action", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},  # noqa: E501
+            {"id": "t2", "title": "Reading", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},  # noqa: E501
+            {"id": "t3", "title": "Waiting", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},  # noqa: E501
+        ]
+
+        result = score_tasks_batch(tasks, "test rubric", "test_key")
+
+        assert result[0]["score"] == 90  # 70 + 10 + 10
+        assert result[1]["score"] == 25  # hard-capped despite align=96
+        assert result[2]["score"] == 0   # waiting always scores 0
 
 
 class TestIntegration:
