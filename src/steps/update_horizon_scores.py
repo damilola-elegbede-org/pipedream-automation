@@ -32,6 +32,12 @@ class HorizonScoringError(Exception):
 # --- Configuration ---
 NOTION_API_VERSION = "2022-06-28"
 CLAUDE_MODEL = "claude-opus-5"
+# Bump whenever the scoring FORMULA changes (not the model or rubric text).
+# A mismatch against pd.state["scoring_formula_version"] forces a full
+# rescan (ENG-1756) — otherwise the incremental path only rescoring
+# edited/unscored tasks would leave one database ranked by two
+# incompatible scoring systems for up to 30 days (Codex pre-PR finding).
+SCORING_FORMULA_VERSION = 2  # v1: single LLM score; v2: gate-then-rank
 BATCH_SIZE = 40  # Increased for fewer batches (was 25)
 LIST_VALUES = ["Next Actions", "Waiting For", "Someday/Maybe"]
 
@@ -1245,13 +1251,23 @@ IMPORTANT: Return ONLY the JSON array, no other text."""
         for i, entry in enumerate(entries):
             cls = entry.get("class")
             align = entry.get("align")
-            unblocks = bool(entry.get("unblocks"))
-            expiring = bool(entry.get("expiring"))
+            unblocks = entry.get("unblocks")
+            expiring = entry.get("expiring")
 
-            if cls not in ("action", "reading", "waiting") or align is None:
+            # Require real JSON booleans — bool(entry.get(...)) would
+            # silently misscore on a missing field (bool(None) == False,
+            # masking the omission) or a truthy non-bool like the string
+            # "false" (bool("false") == True, adding an unintended boost).
+            if (
+                cls not in ("action", "reading", "waiting")
+                or align is None
+                or not isinstance(unblocks, bool)
+                or not isinstance(expiring, bool)
+            ):
                 raise HorizonScoringError(
                     f"Malformed scoring entry at index {i}: {entry}. "
-                    f"Expected class in action|reading|waiting and a numeric align."
+                    f"Expected class in action|reading|waiting, a numeric align, "
+                    f"and boolean unblocks/expiring."
                 )
 
             score = compute_gate_then_rank_score(cls, align, unblocks, expiring)
@@ -1587,10 +1603,14 @@ def handler(pd: "pipedream"):  # noqa: F821
         # --- 4. Task query decision ---
         last_run_at = pd.state.get("last_run_at")
         last_full_scan_at = pd.state.get("last_full_scan_at")
+        stored_scoring_version = pd.state.get("scoring_formula_version")
 
         # Determine if full scan is needed
         needs_full_scan = False
-        if last_full_scan_at is None:
+        scoring_version_changed = stored_scoring_version != SCORING_FORMULA_VERSION
+        if scoring_version_changed:
+            needs_full_scan = True
+        elif last_full_scan_at is None:
             needs_full_scan = True
         else:
             try:
@@ -1603,7 +1623,13 @@ def handler(pd: "pipedream"):  # noqa: F821
         if needs_full_scan or last_run_at is None:
             # Full scan path
             scan_type = "full"
-            if last_run_at is None:
+            if scoring_version_changed and last_run_at is not None:
+                print(
+                    f"\nStep 2: Scoring formula version changed "
+                    f"({stored_scoring_version} -> {SCORING_FORMULA_VERSION}) — "
+                    f"forcing full rescan to avoid mixed-formula rankings"
+                )
+            elif last_run_at is None:
                 print("\nStep 2: First run — performing full scan...")
             else:
                 print("\nStep 2: Full scan triggered (monthly drift detection)")
@@ -1611,6 +1637,7 @@ def handler(pd: "pipedream"):  # noqa: F821
             delta_count = len(tasks)
             backlog_count = 0
             pd.state["last_full_scan_at"] = now_iso
+            pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
             print(f"  Found {len(tasks)} tasks (full scan)")
         else:
             # Incremental path: delta + unscored backlog

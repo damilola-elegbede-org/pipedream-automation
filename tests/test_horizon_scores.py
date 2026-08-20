@@ -25,6 +25,7 @@ from steps.update_horizon_scores import (  # noqa: F401
     call_claude,
     score_tasks_batch,
     compute_gate_then_rank_score,
+    SCORING_FORMULA_VERSION,
     markdown_to_notion_blocks,
     get_score_color,
     create_table_block,
@@ -399,6 +400,30 @@ class TestScoreTasksBatch:
         """A missing/invalid class or align field fails loudly, not silently."""
         mock_claude.return_value = '''[
             {"class": "bogus", "align": 50, "unblocks": false, "expiring": false}
+        ]'''
+
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
+
+        with pytest.raises(HorizonScoringError, match="Malformed scoring entry"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_missing_boolean_field(self, mock_claude):
+        """A missing unblocks/expiring field fails loudly instead of defaulting to False."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": 50}
+        ]'''
+
+        tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
+
+        with pytest.raises(HorizonScoringError, match="Malformed scoring entry"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_stringly_typed_boolean(self, mock_claude):
+        """The string "false" is truthy in Python — must be rejected, not coerced to True."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": 50, "unblocks": "false", "expiring": false}
         ]'''
 
         tasks = [{"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}]  # noqa: E501
@@ -816,6 +841,7 @@ class TestIncrementalQueries:
             mock_pd.state["rubric_cache"] = "Cached rubric"
             mock_pd.state["last_run_at"] = recent
             mock_pd.state["last_full_scan_at"] = recent
+            mock_pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
 
             mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
 
@@ -875,6 +901,64 @@ class TestIncrementalQueries:
             assert result["scan_type"] == "full"
             mock_query.assert_called_once()
             assert mock_pd.state["last_full_scan_at"] is not None
+
+    @patch('steps.update_horizon_scores.update_scores_parallel')
+    @patch('steps.update_horizon_scores.score_all_batches_parallel')
+    @patch('steps.update_horizon_scores.query_tasks')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_full_scan_forced_when_scoring_formula_version_changed(
+        self, mock_meta, mock_query, mock_score_all, mock_update_all, mock_pd
+    ):
+        """A scoring-formula version bump forces a full rescan even with a fresh
+        last_full_scan_at — otherwise old- and new-formula scores would coexist
+        in the same database for up to 30 days (Codex pre-PR finding, ENG-1756)."""
+        from datetime import datetime, timezone
+        recent = datetime.now(timezone.utc).isoformat()
+        with patch.dict(os.environ, self.ENV, clear=True):
+            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.state["rubric_cache"] = "Cached rubric"
+            mock_pd.state["last_run_at"] = recent
+            mock_pd.state["last_full_scan_at"] = recent  # fresh — would normally stay incremental
+            mock_pd.state["scoring_formula_version"] = 1  # stale — deployed formula is v2
+
+            mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
+            mock_query.return_value = [
+                {"id": "t1", "properties": {"Task name": {"type": "title", "title": [{"plain_text": "T1"}]}}}
+            ]
+            mock_score_all.return_value = [{"task_id": "t1", "score": 70, "reasoning": "ok"}]
+            mock_update_all.return_value = ([{"task_id": "t1", "score": 70, "reasoning": "ok"}], [])
+
+            result = handler(mock_pd)
+
+            assert result["scan_type"] == "full"
+            mock_query.assert_called_once()
+            assert mock_pd.state["scoring_formula_version"] == SCORING_FORMULA_VERSION
+
+    @patch('steps.update_horizon_scores.update_scores_parallel')
+    @patch('steps.update_horizon_scores.score_all_batches_parallel')
+    @patch('steps.update_horizon_scores.query_tasks_unscored')
+    @patch('steps.update_horizon_scores.query_tasks_incremental')
+    @patch('steps.update_horizon_scores.fetch_page_metadata')
+    def test_incremental_stays_incremental_when_scoring_version_matches(
+        self, mock_meta, mock_delta, mock_backlog, mock_score_all, mock_update_all, mock_pd
+    ):
+        """Matching scoring_formula_version takes the normal incremental path."""
+        from datetime import datetime, timezone
+        recent = datetime.now(timezone.utc).isoformat()
+        with patch.dict(os.environ, self.ENV, clear=True):
+            mock_pd.state["horizons_last_edited_at"] = "2024-01-01T00:00:00.000Z"
+            mock_pd.state["rubric_cache"] = "Cached rubric"
+            mock_pd.state["last_run_at"] = recent
+            mock_pd.state["last_full_scan_at"] = recent
+            mock_pd.state["scoring_formula_version"] = SCORING_FORMULA_VERSION
+
+            mock_meta.return_value = {"last_edited_time": "2024-01-01T00:00:00.000Z"}
+            mock_delta.return_value = []
+            mock_backlog.return_value = []
+
+            result = handler(mock_pd)
+
+            assert result["scan_type"] == "incremental"
 
     @patch('steps.update_horizon_scores.update_scores_parallel')
     @patch('steps.update_horizon_scores.score_all_batches_parallel')
