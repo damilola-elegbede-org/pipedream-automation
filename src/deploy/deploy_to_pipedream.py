@@ -82,11 +82,34 @@ from .utils import (  # noqa: F401
 BROWSER_PROFILE_DIR = Path(".tmp/browser_profile")
 HEADLESS_AUTH_EXIT_CODE = 2
 
+# Two hours. The old five-minute ceiling was not enough for a human who has to
+# fetch a 2FA device, and a login that expires mid-typing is worse than no
+# automation at all — the profile is left half-written and the next run looks
+# like a fresh failure rather than an interrupted one.
+# The CLI default. Two hours, because the old five minutes was not enough for a
+# human who has to go fetch a 2FA device, and a login that expires mid-typing is
+# worse than no automation — it leaves a half-written profile that makes the
+# next run look like a fresh failure rather than an interrupted one.
+DEFAULT_LOGIN_TIMEOUT_SEC = 7200
+# The CONSTRUCTOR default stays short on purpose. A two-hour wait is only ever
+# correct when a person is sitting at the keyboard, which is exactly the
+# --seed-login case and nothing else. Anything constructing a syncer
+# programmatically (or a test) must not be able to block for two hours.
+LIBRARY_LOGIN_TIMEOUT_SEC = 300
+
 # Playwright browser channel. "chrome" = the locally installed Google Chrome,
 # in its own profile directory (never the human's). Set PIPEDREAM_BROWSER_CHANNEL
 # to "" to force Playwright's bundled Chromium.
 BROWSER_CHANNEL = os.environ.get("PIPEDREAM_BROWSER_CHANNEL", "chrome") or None
 WORKFLOW_ID_ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+
+
+def positive_int(value: str) -> int:
+    """argparse type: reject zero/negative timeouts before they reach the syncer."""
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be greater than zero, got {parsed}")
+    return parsed
 
 
 def preflight_workflow_ids(config_path: str, workflow_keys: Optional[list[str]] = None) -> list[str]:
@@ -179,12 +202,18 @@ class PipedreamSyncer:
         verbose: bool = False,
         screenshot_always: bool = False,
         headless: bool = False,
+        login_timeout_sec: int = LIBRARY_LOGIN_TIMEOUT_SEC,
     ):
         self.config = config
         self.dry_run = dry_run
         self.verbose = verbose
         self.screenshot_always = screenshot_always
         self.headless = headless
+        if login_timeout_sec <= 0:
+            raise PipedreamSyncError(
+                f"login_timeout_sec must be positive, got {login_timeout_sec}"
+            )
+        self.login_timeout_sec = login_timeout_sec
         self.playwright: Optional[Playwright] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -323,6 +352,46 @@ class PipedreamSyncer:
             self.log(f"Failed to take screenshot: {e}", "warn")
             return None
 
+
+    # pipedream.com/workflows is a MARKETING page. It renders "Sign in / Sign up"
+    # and the title "Workflows" whether or not you have a session, so the old
+    # `"/workflows" in url` heuristic reported success for a logged-out browser
+    # — which is why --seed-login kept declaring victory and closing the window
+    # on a human who had not logged in yet. Probe a route that only renders for
+    # an authenticated session instead, and decide on page CONTENT, never on the
+    # URL or the tab title.
+    AUTH_PROBE_URL = "/settings/account"
+    SIGNED_OUT_MARKERS = ("Start for free", "Sign up", "Connect apps, databases")
+    AUTHENTICATED_MARKERS = ("Workspace settings",)
+
+    async def _is_authenticated(self) -> bool:
+        """True only when an authenticated Pipedream page actually renders."""
+        if not self.page:
+            return False
+        try:
+            await self.page.goto(
+                f"{self.config.pipedream_base_url}{self.AUTH_PROBE_URL}",
+                wait_until="networkidle",
+                timeout=45000,
+            )
+            await asyncio.sleep(2)
+            body = await self.page.inner_text("body")
+        except Exception as e:
+            self.log(f"auth probe transient: {e.__class__.__name__}", "debug")
+            return False
+        if not isinstance(body, str):
+            # Unreadable page body is not evidence of a session. Fail closed —
+            # a false "yes" here is what closed the browser on a human
+            # mid-login, and it is the more expensive direction to be wrong in.
+            return False
+        # Absence of a signed-out marker is not proof of a session either — an
+        # empty body or an unrelated error page contains neither marker set.
+        # Require a marker that only renders on the authenticated settings page.
+        return (
+            any(m in body for m in self.AUTHENTICATED_MARKERS)
+            and not any(m in body for m in self.SIGNED_OUT_MARKERS)
+        )
+
     async def wait_for_login(self) -> bool:
         """
         Wait for user to complete login via Google SSO.
@@ -336,19 +405,9 @@ class PipedreamSyncer:
         self.log("Checking login status...")
         await self.page.goto(self.config.pipedream_base_url, wait_until="networkidle")
 
-        # Check if already logged in - by selector OR by URL redirect
-        # When logged in, Pipedream often redirects to /workflows or /projects
-        current_url = self.page.url
-        if "/workflows" in current_url or "/projects" in current_url:
-            self.log("Already logged in (redirected to dashboard)!")
+        if await self._is_authenticated():
+            self.log("Already logged in.")
             return True
-
-        try:
-            await self.page.wait_for_selector(LOGGED_IN_INDICATOR, timeout=3000)
-            self.log("Already logged in!")
-            return True
-        except PlaywrightTimeout:
-            pass
 
         if self.headless:
             raise HeadlessAuthenticationError(
@@ -371,30 +430,63 @@ class PipedreamSyncer:
         print("2. Complete the Google SSO login")
         print("3. Wait for the Pipedream dashboard to load")
         print("=" * 50)
-        print("\nWaiting for login (5 minute timeout)...")
+        max_wait = self.login_timeout_sec
+        print(f"\nWaiting for login (timeout {max_wait // 60} minutes). Take your time.")
 
-        # Wait for login to complete (check every 2 seconds)
-        max_wait = 300  # 5 minutes
-        waited = 0
+        # Poll against a monotonic deadline (each probe and sleep is capped by
+        # the time remaining, so a slow probe can't blow past max_wait). Two
+        # things this loop must survive, both of which used to close the
+        # browser out from under the human mid-login:
+        #
+        # 1. `except PlaywrightTimeout` was too narrow. Google SSO navigates
+        #    several times, and a selector query that straddles a navigation
+        #    raises "Execution context was destroyed", NOT a timeout. That
+        #    escaped the loop, escaped wait_for_login, and hit seed_login's
+        #    `finally: teardown_browser()` — so the window vanished exactly
+        #    when the person started typing. Catch everything here; the only
+        #    way out of this loop is a real login or the clock.
+        #
+        # 2. Google frequently completes SSO in a popup or a new tab, which
+        #    means `self.page` is not where the logged-in state appears. Check
+        #    every page the context holds, and adopt whichever one landed on
+        #    the dashboard so later steps drive the right tab.
+        deadline = time.monotonic() + max_wait
+        last_reported_minute = 0
 
-        while waited < max_wait:
+        while (remaining := deadline - time.monotonic()) > 0:
             try:
-                # Check for logged-in indicator
-                await self.page.wait_for_selector(LOGGED_IN_INDICATOR, timeout=2000)
-                print("\nLogin successful!")
-                return True
-            except PlaywrightTimeout:
-                pass
+                pages = [p for p in (self.context.pages if self.context else []) if not p.is_closed()]
+                if self.page and not self.page.is_closed() and self.page not in pages:
+                    pages.append(self.page)
+                for page in pages:
+                    try:
+                        if "pipedream.com" not in page.url:
+                            continue  # still inside Google's SSO flow
+                    except Exception:
+                        continue
+                    original, self.page = self.page, page
+                    try:
+                        authenticated = await asyncio.wait_for(
+                            self._is_authenticated(), timeout=remaining
+                        )
+                    except asyncio.TimeoutError:
+                        self.page = original
+                        break
+                    if authenticated:
+                        print("\nLogin successful!")
+                        return True
+                    self.page = original
+            except Exception as e:
+                # Never fatal. A transient browser-state error during the login
+                # dance is expected; tearing down here is the bug being fixed.
+                self.log(f"login poll transient: {e.__class__.__name__}", "debug")
 
-            # Also check URL - if we're on dashboard/workflows, we're logged in
-            current_url = self.page.url
-            if "/workflows" in current_url or "/projects" in current_url:
-                print("\nLogin successful!")
-                return True
-
-            waited += 2
-            if waited % 30 == 0:
-                print(f"  Still waiting... ({waited}s elapsed)")
+            sleep_for = min(2, max(0, deadline - time.monotonic()))
+            await asyncio.sleep(sleep_for)
+            elapsed_minutes = int(max_wait - max(0, deadline - time.monotonic())) // 60
+            if elapsed_minutes > last_reported_minute:
+                last_reported_minute = elapsed_minutes
+                print(f"  Still waiting... ({elapsed_minutes} min elapsed, browser stays open)")
 
         print("\nLogin timeout! Please try again.")
         return False
@@ -1601,6 +1693,7 @@ async def main_async(args: argparse.Namespace) -> int:
         verbose=args.verbose,
         screenshot_always=args.screenshot_always,
         headless=args.headless,
+        login_timeout_sec=args.login_timeout,
     )
 
     try:
@@ -1707,6 +1800,13 @@ Exit codes:
             "Open a headed browser, wait for Google SSO, then seed the "
             "persistent profile without deploying"
         ),
+    )
+    parser.add_argument(
+        "--login-timeout",
+        type=positive_int,
+        default=DEFAULT_LOGIN_TIMEOUT_SEC,
+        metavar="SECONDS",
+        help=f"how long --seed-login waits for the human to finish Google SSO (default {DEFAULT_LOGIN_TIMEOUT_SEC}s)",
     )
     parser.add_argument(
         "--config",
