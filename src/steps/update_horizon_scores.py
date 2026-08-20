@@ -802,10 +802,16 @@ def call_claude(prompt, anthropic_key, max_tokens=4096, session=None):
     )
 
     data = response.json()
-    content = data.get("content", [])
-    if content and len(content) > 0:
-        return content[0].get("text", "")
-    raise Exception(f"Unexpected Claude response format: {data}")
+    # Claude's adaptive thinking can prepend thinking/redacted_thinking
+    # blocks before the final text block, so content[0] is not reliably
+    # the answer — scan for the first non-empty text block instead.
+    for block in data.get("content", []):
+        if block.get("type") == "text" and block.get("text"):
+            return block["text"]
+    raise HorizonScoringError(
+        f"No usable text block in Claude response "
+        f"(stop_reason={data.get('stop_reason')}): {data}"
+    )
 
 
 def generate_rubric(horizons_content, anthropic_key, session=None):
@@ -1140,7 +1146,9 @@ def extract_task_info(task, headers=None, session=None, project_cache=None):
     return task_info
 
 
-def compute_gate_then_rank_score(cls, align, unblocks, expiring):
+def compute_gate_then_rank_score(
+    cls: str, align: float, unblocks: bool, expiring: bool
+) -> int:
     """
     Deterministic gate-then-rank scoring (Fable advisor ruling, 2026-08-09).
 
@@ -1150,18 +1158,19 @@ def compute_gate_then_rank_score(cls, align, unblocks, expiring):
     within the gate using `align` plus small leverage/decay boosts computed
     in Python, never by the LLM.
     """
+    # int() truncates deliberately — scores are whole numbers and truncation
+    # keeps the mapping monotonic and reproducible.
     align = max(0, min(100, int(align)))
 
     if cls == "action":
         return min(100, align + (10 if unblocks else 0) + (10 if expiring else 0))
-    elif cls == "reading":
+    if cls == "reading":
         return min(align, 25)  # hard cap — reading never outranks a real action
-    elif cls == "waiting":
+    if cls == "waiting":
         return 0  # misfiled — actually waiting on someone else, re-triage separately
-    else:
-        raise HorizonScoringError(
-            f"Unknown class value {cls!r} (expected action|reading|waiting)"
-        )
+    raise HorizonScoringError(
+        f"Unknown class value {cls!r} (expected action|reading|waiting)"
+    )
 
 
 def score_tasks_batch(tasks, rubric, anthropic_key, session=None):
@@ -1237,11 +1246,20 @@ IMPORTANT: Return ONLY the JSON array, no other text."""
         json_str = response_text[start_idx:end_idx]
         entries = json.loads(json_str)
 
-        # Validate entry count matches task count
-        if len(entries) != len(tasks):
+        # Validate entry count matches task count. Fewer entries than tasks
+        # means Claude silently dropped tail tasks — truncating to that
+        # short list would leave those tasks unscored with no error raised,
+        # letting SCORING_FORMULA_VERSION commit after an incomplete scan.
+        # Extra entries are still truncated; that's just a chatty response.
+        if len(entries) < len(tasks):
+            raise HorizonScoringError(
+                f"Claude returned {len(entries)} entries for {len(tasks)} "
+                f"tasks — response is incomplete."
+            )
+        if len(entries) > len(tasks):
             print(
                 f"Warning: Entry count mismatch: got {len(entries)} entries "
-                f"for {len(tasks)} tasks. Truncating to min."
+                f"for {len(tasks)} tasks. Truncating extras."
             )
             entries = entries[:len(tasks)]
 

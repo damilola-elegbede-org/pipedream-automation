@@ -264,7 +264,7 @@ class TestCallClaude:
     def test_returns_response_text(self, mock_post):
         mock_response = MagicMock()
         mock_response.json.return_value = {
-            "content": [{"text": "This is the response"}]
+            "content": [{"type": "text", "text": "This is the response"}]
         }
         mock_post.return_value = mock_response
 
@@ -275,7 +275,7 @@ class TestCallClaude:
     @patch('steps.update_horizon_scores.requests.post')
     def test_uses_correct_headers(self, mock_post):
         mock_response = MagicMock()
-        mock_response.json.return_value = {"content": [{"text": "ok"}]}
+        mock_response.json.return_value = {"content": [{"type": "text", "text": "ok"}]}
         mock_post.return_value = mock_response
 
         call_claude("Test", "my_api_key")
@@ -284,6 +284,45 @@ class TestCallClaude:
         headers = call_args[1]["headers"]
         assert headers["x-api-key"] == "my_api_key"
         assert headers["anthropic-version"] == "2023-06-01"
+
+    @patch('steps.update_horizon_scores.requests.post')
+    def test_skips_thinking_blocks_before_text(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "content": [
+                {"type": "thinking", "thinking": "internal reasoning"},
+                {"type": "text", "text": "This is the response"},
+            ]
+        }
+        mock_post.return_value = mock_response
+
+        result = call_claude("Test prompt", "test_key")
+
+        assert result == "This is the response"
+
+    @patch('steps.update_horizon_scores.requests.post')
+    def test_skips_redacted_thinking_blocks_before_text(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "content": [
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "text", "text": "This is the response"},
+            ]
+        }
+        mock_post.return_value = mock_response
+
+        result = call_claude("Test prompt", "test_key")
+
+        assert result == "This is the response"
+
+    @patch('steps.update_horizon_scores.requests.post')
+    def test_raises_on_refusal_with_no_text_block(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"content": [], "stop_reason": "refusal"}
+        mock_post.return_value = mock_response
+
+        with pytest.raises(HorizonScoringError, match="No usable text block"):
+            call_claude("Test prompt", "test_key")
 
 
 class TestComputeGateThenRankScore:
@@ -306,6 +345,13 @@ class TestComputeGateThenRankScore:
     def test_unknown_class_raises(self):
         with pytest.raises(HorizonScoringError, match="Unknown class value"):
             compute_gate_then_rank_score("bogus", 50, False, False)
+
+    def test_align_is_clamped_to_0_100(self):
+        assert compute_gate_then_rank_score("action", 150, False, False) == 100
+        assert compute_gate_then_rank_score("action", -20, False, False) == 0
+
+    def test_float_align_is_truncated(self):
+        assert compute_gate_then_rank_score("action", 85.9, False, False) == 85
 
 
 class TestScoreTasksBatch:
@@ -366,7 +412,7 @@ class TestScoreTasksBatch:
         assert result[1]["task_id"] == "real_id_2"
 
     @patch('steps.update_horizon_scores.call_claude')
-    def test_truncates_on_score_count_mismatch(self, mock_claude):
+    def test_truncates_extra_entries_on_score_count_mismatch(self, mock_claude):
         """Extra scores from Claude are truncated to match task count."""
         mock_claude.return_value = '''[
             {"class": "action", "align": 80, "unblocks": false, "expiring": false},
@@ -384,6 +430,21 @@ class TestScoreTasksBatch:
         assert len(result) == 2
         assert result[0]["task_id"] == "task_1"
         assert result[1]["task_id"] == "task_2"
+
+    @patch('steps.update_horizon_scores.call_claude')
+    def test_raises_on_score_count_shortfall(self, mock_claude):
+        """Fewer entries than tasks fails loudly instead of dropping tasks."""
+        mock_claude.return_value = '''[
+            {"class": "action", "align": 80, "unblocks": false, "expiring": false}
+        ]'''
+
+        tasks = [
+            {"id": "task_1", "title": "Task 1", "list": "Next Actions", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""},  # noqa: E501
+            {"id": "task_2", "title": "Task 2", "list": "Waiting For", "project": "", "area": "", "priority": "", "due_date": "", "notes": ""}  # noqa: E501
+        ]
+
+        with pytest.raises(HorizonScoringError, match="entries for 2 tasks"):
+            score_tasks_batch(tasks, "test rubric", "test_key")
 
     @patch('steps.update_horizon_scores.call_claude')
     def test_raises_on_invalid_json(self, mock_claude):
