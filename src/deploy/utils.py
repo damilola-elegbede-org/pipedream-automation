@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 import os
 import time
@@ -356,6 +357,17 @@ def read_script_content(script_path: str, base_path: Optional[Path] = None) -> s
         return f.read()
 
 
+def build_deploy_header() -> str:
+    """The comment block prepended before paste to force Pipedream to notice a
+    change (it won't update a step whose code is byte-identical to what's live).
+
+    Centralized so the size check in read_deploy_payload and the clipboard write
+    in update_code always agree on what's actually being pasted.
+    """
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"# Deployed by pipedream-automation\n# Timestamp: {timestamp}\n\n"
+
+
 def read_deploy_payload(script_path: str, base_path: Optional[Path] = None) -> str:
     """The bytes actually pasted into a Pipedream step.
 
@@ -365,7 +377,10 @@ def read_deploy_payload(script_path: str, base_path: Optional[Path] = None) -> s
     """
     source = read_script_content(script_path, base_path)
     payload = strip_for_deploy(source)
-    size = len(payload.encode("utf-8"))
+    # Measure the complete string that lands in the editor, header included —
+    # a payload that fits before the header can still exceed the limit after it.
+    pasted = build_deploy_header() + payload
+    size = len(pasted.encode("utf-8"))
     if size > PIPEDREAM_CODE_BYTE_LIMIT:
         # Fail here, loudly, with the number. Pipedream's own failure for this is
         # a MySQL error surfaced only inside the step's Test panel, after the
@@ -373,8 +388,9 @@ def read_deploy_payload(script_path: str, base_path: Optional[Path] = None) -> s
         # in DEPLOY PENDING and nothing in the deploy output says why.
         raise ValueError(
             f"{script_path}: deploy payload is {size:,} bytes after stripping "
-            f"comments and docstrings, over Pipedream's {PIPEDREAM_CODE_BYTE_LIMIT:,}-byte "
-            f"step-code limit by {size - PIPEDREAM_CODE_BYTE_LIMIT:,}. "
+            f"comments and docstrings and adding the deploy header, over Pipedream's "
+            f"{PIPEDREAM_CODE_BYTE_LIMIT:,}-byte step-code limit by "
+            f"{size - PIPEDREAM_CODE_BYTE_LIMIT:,}. "
             f"(source is {len(source.encode('utf-8')):,} bytes)"
         )
     return payload
@@ -523,7 +539,7 @@ def strip_for_deploy(src: str) -> str:
     import tokenize
 
     tree = ast.parse(src)
-    doc_positions = set()
+    doc_spans = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
@@ -534,13 +550,17 @@ def strip_for_deploy(src: str) -> str:
         if len(body) > 1 and isinstance(body[0], ast.Expr) \
                 and isinstance(body[0].value, ast.Constant) \
                 and isinstance(body[0].value.value, str):
-            doc_positions.add((body[0].value.lineno, body[0].value.col_offset))
+            value = body[0].value
+            # A docstring can be several adjacent string literals concatenated
+            # by the parser into one Constant — the full [start, end] span
+            # covers every token, not just the one at (lineno, col_offset).
+            doc_spans.append(((value.lineno, value.col_offset), (value.end_lineno, value.end_col_offset)))
 
     kept = []
     for tok in tokenize.generate_tokens(io.StringIO(src).readline):
         if tok.type == tokenize.COMMENT:
             continue
-        if tok.type == tokenize.STRING and (tok.start[0], tok.start[1]) in doc_positions:
+        if tok.type == tokenize.STRING and any(start <= tok.start <= end for start, end in doc_spans):
             continue
         kept.append(tok)
 
@@ -550,16 +570,30 @@ def strip_for_deploy(src: str) -> str:
     # "\\" lines at the top of the payload. Dropping positions reconstructs
     # clean source from the token text alone.
     text = tokenize.untokenize([(t.type, t.string) for t in kept])
+
+    # Lines that fall inside a surviving multiline STRING token (a runtime
+    # value, not a docstring — those were already dropped above) must pass
+    # through untouched: trailing spaces and blank runs inside a triple-quoted
+    # string are part of its value, not formatting for cleanup to collapse.
+    protected_lines = set()
+    for tok in kept:
+        if tok.type == tokenize.STRING and tok.start[0] != tok.end[0]:
+            protected_lines.update(range(tok.start[0], tok.end[0] + 1))
+
     lines, cleaned, blanks = text.split("\n"), [], 0
-    for line in lines:
-        line = line.rstrip()
-        if not line.strip():
+    for lineno, raw_line in enumerate(lines, start=1):
+        if lineno in protected_lines:
+            blanks = 0
+            cleaned.append(raw_line)
+            continue
+        stripped_line = raw_line.rstrip()
+        if not stripped_line.strip():
             blanks += 1
             if blanks > 1:
                 continue
         else:
             blanks = 0
-        cleaned.append(line)
+        cleaned.append(stripped_line)
     out = "\n".join(cleaned)
     compile(out, "<stripped>", "exec")  # never ship something that will not parse
     return out
