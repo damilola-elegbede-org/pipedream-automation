@@ -72,6 +72,7 @@ from .utils import (  # noqa: F401
     generate_report,
     get_cached_cookies,
     load_and_set_env_local,
+    read_deploy_payload,
     read_script_content,
     save_cookies_to_env_local,
     validate_cookie_expiration,
@@ -1370,7 +1371,8 @@ class PipedreamSyncer:
 
             try:
                 # Read expected code from local file
-                expected_code = read_script_content(script_path, base_path)
+                # Compare against what we actually deploy, not the source on disk.
+                expected_code = read_deploy_payload(script_path, base_path)
 
                 # Close any open panel first
                 await self.close_step_panel()
@@ -1489,7 +1491,7 @@ class PipedreamSyncer:
             )
 
         try:
-            new_code = read_script_content(script_path, base_path)
+            new_code = read_deploy_payload(script_path, base_path)
 
             # Close any previously open step panel FIRST
             await self.close_step_panel()
