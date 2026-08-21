@@ -1243,7 +1243,8 @@ class PipedreamSyncer:
                     try:
                         workflows_on_page = await self.page.evaluate("""
                             () => {
-                                const rows = document.querySelectorAll('a[href*="/build"], [class*="workflow"], tr, [role="row"]');  # noqa: E501
+                                const sel = 'a[href*="/build"], [class*="workflow"], tr, [role="row"]';
+                                const rows = document.querySelectorAll(sel);
                                 return [...rows].slice(0, 10).map(row => {
                                     const text = (row.innerText || row.textContent || '').trim();
                                     return text.substring(0, 100);  // First 100 chars
@@ -1261,7 +1262,8 @@ class PipedreamSyncer:
                 has_pending = await self.page.evaluate("""
                     (workflowName) => {
                         // Find all workflow rows/cards on the page
-                        const rows = document.querySelectorAll('a[href*="/build"], [class*="workflow"], tr, [role="row"]');  # noqa: E501
+                        const sel = 'a[href*="/build"], [class*="workflow"], tr, [role="row"]';
+                        const rows = document.querySelectorAll(sel);
                         for (const row of rows) {
                             const text = row.innerText || row.textContent || '';
                             // Check if this row contains both the workflow name and DEPLOY PENDING
@@ -1593,7 +1595,12 @@ class PipedreamSyncer:
                         print("    ✗ Verification failed - some steps may not have saved")
                         result.status = "partial"
                 else:
-                    print(f"    Warning: {workflow_key} may not be deployed")
+                    result.status = "failed"
+                    result.error = result.error or (
+                        "Deploy status could not be confirmed (status check error or "
+                        "still DEPLOY PENDING after timeout) -- see debug logs"
+                    )
+                    print(f"    X {workflow_key} deploy not confirmed: {result.error}")
 
         except (NavigationError, AuthenticationError) as e:
             result.status = "failed"
