@@ -226,11 +226,16 @@ class TestNotionDomainCutover:
 
     def test_incomplete_leaves_status_untouched(self, mock_pd):
         """Google has two states, Notion has four. Mapping needsAction onto one
-        of them would overwrite a deliberate Not Started or Archived."""
+        of them would overwrite a deliberate Not Started or Archived.
+
+        StatusValue must be OMITTED, not sent as null: the downstream Notion
+        action maps provided fields onto the page, and a present-but-null
+        StatusValue would clear an existing Not Started/Archived value rather
+        than leaving it alone (PR #40 review comment)."""
         mock_pd.steps = self._trigger(self.APP_NOTION_NOTES, status="needsAction")
         result = handler(mock_pd)
         assert result["NotionUpdate"]["ListValue"] == "Next Actions"
-        assert result["NotionUpdate"]["StatusValue"] is None
+        assert "StatusValue" not in result["NotionUpdate"]
 
     def test_extractor_resolves_both_domains(self):
         """The extractor was always domain-agnostic; only the guard was not."""

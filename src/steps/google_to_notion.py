@@ -283,18 +283,23 @@ def handler(pd: "pipedream"):  # noqa: F821
     logger.info(f"Due date: {notion_due_date}")
 
     # --- 5. Prepare Return Value ---
-    ret_val = {
-        "NotionUpdate": {
-            "PageId": page_id,
-            "ListValue": list_value,  # For Notion "List" field
-            # ENG-2091. None when the task is not completed — see above.
-            "StatusValue": status_value,  # For Notion "Status" field
-            "DueDate": {
-                "start": notion_due_date,
-                "end": None
-            } if notion_due_date else None
-        }
+    notion_update = {
+        "PageId": page_id,
+        "ListValue": list_value,  # For Notion "List" field
+        "DueDate": {
+            "start": notion_due_date,
+            "end": None
+        } if notion_due_date else None
     }
+    # ENG-2091: omit the key entirely when the task isn't completed, rather
+    # than sending StatusValue: None. The downstream Notion action maps
+    # provided fields onto the page — a present-but-null StatusValue would
+    # clear (or fail to preserve) an existing Notion "Not Started" or
+    # "Archived" value instead of leaving it untouched.
+    if status_value is not None:
+        notion_update["StatusValue"] = status_value  # For Notion "Status" field
+
+    ret_val = {"NotionUpdate": notion_update}
 
     logger.info(f"Returning: {ret_val}")
 
