@@ -15,6 +15,7 @@ import pytest
 from src.deploy.config import DeployConfig, DeploySettings, StepConfig, WorkflowConfig
 from src.deploy.exceptions import NavigationError, AuthenticationError, PipedreamSyncError
 from src.deploy.deploy_to_pipedream import PipedreamSyncer, WorkflowResult, StepResult
+from src.deploy.utils import generate_report
 
 
 @pytest.fixture
@@ -121,24 +122,48 @@ class TestSyncWorkflowStepHandling:
 
     @pytest.mark.asyncio
     async def test_sync_workflow_mixed_step_results(self, mock_config):
-        """Test sync_workflow with some steps succeeding and some failing."""
+        """One step failing, but the deploy itself is confirmed, yields partial."""
         syncer = PipedreamSyncer(config=mock_config)
         syncer.page = AsyncMock()
-        
+
         # Mock step sync to return different results
         step_results = [
             StepResult(step_name="step1", script_path="src/steps/step1.py", status="success"),
             StepResult(step_name="step2", script_path="src/steps/step2.py", status="failed", message="Error"),
         ]
-        
+
+        with patch.object(syncer, 'navigate_to_workflow', new_callable=AsyncMock):
+            with patch.object(syncer, 'sync_step', new_callable=AsyncMock, side_effect=step_results):
+                with patch.object(syncer, 'deploy_workflow', new_callable=AsyncMock, return_value=True):
+                    with patch.object(syncer, 'verify_workflow_after_deploy', new_callable=AsyncMock, return_value=True):
+                        with tempfile.TemporaryDirectory() as tmp_dir:
+                            result = await syncer.sync_workflow("test_workflow", Path(tmp_dir))
+
+        assert result.status == "partial"
+        assert len(result.steps) == 2
+
+    @pytest.mark.asyncio
+    async def test_sync_workflow_mixed_step_results_then_unconfirmed_deploy(self, mock_config):
+        """ENG-1979: partial-from-steps must not mask an unconfirmed deploy.
+        Since the workflow still attempts deploy on "partial", an unconfirmed
+        deploy afterward must still surface as failed -- generate_report()
+        counts neither "success" nor "partial" toward "failed", so a silent
+        partial-with-bad-deploy would vanish from both report buckets."""
+        syncer = PipedreamSyncer(config=mock_config)
+        syncer.page = AsyncMock()
+
+        step_results = [
+            StepResult(step_name="step1", script_path="src/steps/step1.py", status="success"),
+            StepResult(step_name="step2", script_path="src/steps/step2.py", status="failed", message="Error"),
+        ]
+
         with patch.object(syncer, 'navigate_to_workflow', new_callable=AsyncMock):
             with patch.object(syncer, 'sync_step', new_callable=AsyncMock, side_effect=step_results):
                 with patch.object(syncer, 'deploy_workflow', new_callable=AsyncMock, return_value=False):
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         result = await syncer.sync_workflow("test_workflow", Path(tmp_dir))
-        
-        assert result.status == "partial"
-        assert len(result.steps) == 2
+
+        assert result.status == "failed"
 
     @pytest.mark.asyncio
     async def test_sync_workflow_all_steps_fail(self, mock_config):
@@ -185,23 +210,34 @@ class TestSyncWorkflowDeployment:
 
     @pytest.mark.asyncio
     async def test_sync_workflow_deploy_failure(self, mock_config):
-        """Test sync_workflow handles deploy failure gracefully."""
+        """ENG-1979: deploy_workflow() returning False means the deploy status
+        could not be confirmed (status-check error, or still DEPLOY PENDING
+        after timeout). That must count as failed, not success -- a caller
+        reading the exit code or the "Successful" count must never be told
+        a deploy succeeded when it was never confirmed."""
         syncer = PipedreamSyncer(config=mock_config, verbose=True)
         syncer.page = AsyncMock()
-        
+
         step_results = [
             StepResult(step_name="step1", script_path="src/steps/step1.py", status="success"),
             StepResult(step_name="step2", script_path="src/steps/step2.py", status="success"),
         ]
-        
+
         with patch.object(syncer, 'navigate_to_workflow', new_callable=AsyncMock):
             with patch.object(syncer, 'sync_step', new_callable=AsyncMock, side_effect=step_results):
                 with patch.object(syncer, 'deploy_workflow', new_callable=AsyncMock, return_value=False):
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         result = await syncer.sync_workflow("test_workflow", Path(tmp_dir))
-        
-        # Status should be success but we continue without verification
-        assert result.status in ["success", "partial"]
+
+        assert result.status == "failed"
+        assert result.error and "not" in result.error.lower()
+
+        report = generate_report(
+            [{"workflow": "test_workflow", "id": "w1", "status": result.status,
+              "error": result.error, "steps": []}]
+        )
+        assert report["successful"] == 0
+        assert report["failed"] == 1
 
     @pytest.mark.asyncio
     async def test_sync_workflow_verification_failure(self, mock_config):
@@ -469,20 +505,21 @@ class TestWorkflowStatusAggregation:
 
     @pytest.mark.asyncio
     async def test_workflow_partial_when_some_steps_fail(self, mock_config):
-        """Test workflow is partial when some steps fail."""
+        """Test workflow is partial when some steps fail and the deploy is confirmed."""
         syncer = PipedreamSyncer(config=mock_config)
         syncer.page = AsyncMock()
-        
+
         # Mix of success and failure
         step_results = [
             StepResult(step_name="step1", script_path="src/steps/step1.py", status="success"),
             StepResult(step_name="step2", script_path="src/steps/step2.py", status="failed"),
         ]
-        
+
         with patch.object(syncer, 'navigate_to_workflow', new_callable=AsyncMock):
             with patch.object(syncer, 'sync_step', new_callable=AsyncMock, side_effect=step_results):
-                with patch.object(syncer, 'deploy_workflow', new_callable=AsyncMock, return_value=False):
-                    with tempfile.TemporaryDirectory() as tmp_dir:
-                        result = await syncer.sync_workflow("test_workflow", Path(tmp_dir))
-        
+                with patch.object(syncer, 'deploy_workflow', new_callable=AsyncMock, return_value=True):
+                    with patch.object(syncer, 'verify_workflow_after_deploy', new_callable=AsyncMock, return_value=True):
+                        with tempfile.TemporaryDirectory() as tmp_dir:
+                            result = await syncer.sync_workflow("test_workflow", Path(tmp_dir))
+
         assert result.status == "partial"
