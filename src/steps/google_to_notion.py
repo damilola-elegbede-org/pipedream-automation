@@ -9,6 +9,7 @@ Usage: Copy-paste into a Pipedream Python step
 """
 import logging
 import re
+from urllib.parse import urlparse
 
 # Configure logging for Pipedream
 logger = logging.getLogger()
@@ -66,14 +67,43 @@ def safe_get(data, keys, default=None):
 # notion_task_to_google.py writes that value verbatim into the task notes.
 # A literal "notion.so/" test made the reverse sync exit at step 1 for every
 # task created after the cutover — 39 open tasks, dead for 16 weeks.
-NOTION_URL_PATTERN = re.compile(r"https?://[^\s]*notion\.(?:so|com)/", re.IGNORECASE)
+# Any absolute URL in the notes; the HOST is checked properly below.
+# Deliberately NOT a substring test for "notion.so/" or "notion.com/", and not
+# a pattern like https?://[^\s]*notion\.com/ — CodeQL
+# py/incomplete-url-substring-sanitization flagged that on this file and it is
+# right: both accept https://evil.example/notion.com/ and
+# https://evil.example/?redirect=notion.com/. Same defect class as ENG-1712.
+_URL_PATTERN = re.compile(r"""https?://[^\s<>"']+""", re.IGNORECASE)
+
+# Notion serves page URLs from both domains; app.notion.com replaced
+# www.notion.so in the API's `url` property on 2026-05-10 (ENG-2091).
+_NOTION_HOSTS = frozenset({"notion.so", "notion.com"})
 
 
-def is_notion_linked(text: str) -> bool:
-    """True when `text` carries a Notion URL of either domain."""
+def _is_notion_host(host):
+    """True when `host` IS a Notion domain or a subdomain of one.
+
+    Accepts notion.so, www.notion.so, app.notion.com. Rejects
+    notion.so.evil.example and evil-notion.com — a bare suffix test would
+    accept the second.
+    """
+    host = (host or "").lower().split(":")[0].rstrip(".")
+    if host in _NOTION_HOSTS:
+        return True
+    return any(host.endswith("." + h) for h in _NOTION_HOSTS)
+
+
+def is_notion_linked(text):
+    """True when `text` carries a URL whose HOST is Notion, either domain."""
     if not text:
         return False
-    return bool(NOTION_URL_PATTERN.search(text))
+    for match in _URL_PATTERN.finditer(text):
+        try:
+            if _is_notion_host(urlparse(match.group(0)).hostname or ""):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def extract_notion_page_id(text):
@@ -103,9 +133,13 @@ def extract_notion_page_id(text):
     # carried the same domain assumption as the guard and would reintroduce
     # the defect the moment the pattern changed.
     try:
-        if "notion.so/" in text or "notion.com/" in text:
-            # Find the URL portion
-            url_match = re.search(r'https?://[^\s]+notion\.(?:so|com)/[^\s]+', text)
+        if is_notion_linked(text):
+            # Find the URL portion — selected by HOST, not by substring.
+            url_match = next(
+                (m for m in _URL_PATTERN.finditer(text)
+                 if _is_notion_host(urlparse(m.group(0)).hostname or "")),
+                None,
+            )
             if url_match:
                 url = url_match.group(0)
                 # Remove query params

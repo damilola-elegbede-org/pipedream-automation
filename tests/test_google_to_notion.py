@@ -8,7 +8,7 @@ import os
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from steps.google_to_notion import handler, safe_get, extract_notion_page_id, format_notion_date
+from steps.google_to_notion import handler, safe_get, extract_notion_page_id, format_notion_date, is_notion_linked
 
 
 class TestSafeGet:
@@ -236,3 +236,49 @@ class TestNotionDomainCutover:
         """The extractor was always domain-agnostic; only the guard was not."""
         for notes in (self.APP_NOTION_NOTES, self.LEGACY_NOTES):
             assert extract_notion_page_id(notes) == "3be48b0cacbf8155a353cf5575eaf3c1"
+
+
+class TestNotionHostSanitization:
+    """CodeQL py/incomplete-url-substring-sanitization (high) on PR #40.
+
+    The first version of the ENG-2091 fix tested `"notion.com/" in text` and,
+    in the fallback, matched `https?://[^\\s]*notion\\.(?:so|com)/`. Both accept
+    a URL that merely CONTAINS the string — an attacker-controlled host with
+    "notion.com/" in its path or query passes. Same defect class as ENG-1712.
+
+    The guard decides whether a Google task is Notion-originated, and its
+    output feeds a page id straight into a Notion write. A task whose notes an
+    attacker can influence should not be able to spoof that.
+    """
+
+    @pytest.mark.parametrize("url", [
+        "https://www.notion.so/Page-3be48b0cacbf8155a353cf5575eaf3c1",
+        "https://app.notion.com/p/Page-3be48b0cacbf8155a353cf5575eaf3c1",
+        "https://notion.so/3be48b0cacbf8155a353cf5575eaf3c1",
+        "https://NOTION.COM/p/3be48b0cacbf8155a353cf5575eaf3c1",
+    ])
+    def test_genuine_notion_hosts_accepted(self, url):
+        assert is_notion_linked(f"Link: {url}") is True
+
+    @pytest.mark.parametrize("url", [
+        # the string appears, the HOST is not Notion
+        "https://evil.example/notion.com/3be48b0cacbf8155a353cf5575eaf3c1",
+        "https://evil.example/?redirect=https://notion.so/abc",
+        # suffix-only checks would accept these
+        "https://notion.so.evil.example/p/3be48b0cacbf8155a353cf5575eaf3c1",
+        "https://evil-notion.com/p/3be48b0cacbf8155a353cf5575eaf3c1",
+        "https://fakenotion.so/p/3be48b0cacbf8155a353cf5575eaf3c1",
+    ])
+    def test_lookalike_hosts_rejected(self, url):
+        assert is_notion_linked(f"Link: {url}") is False, (
+            f"{url} is not a Notion URL — its host is not a Notion domain"
+        )
+
+    def test_a_lookalike_does_not_reach_the_notion_write(self, mock_pd):
+        """End to end: a spoofed host must exit, not return a PageId."""
+        mock_pd.steps = {"trigger": {"event": {
+            "title": "Spoofed",
+            "notes": "Link: https://evil.example/notion.so/3be48b0cacbf8155a353cf5575eaf3c1",
+        }}}
+        handler(mock_pd)
+        assert mock_pd.flow.exit_called is True
