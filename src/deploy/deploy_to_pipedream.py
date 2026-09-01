@@ -68,10 +68,12 @@ from .selectors import (  # noqa: F401
     workflow_edit_url,
 )
 from .utils import (  # noqa: F401
+    build_deploy_header,
     ensure_screenshot_dir,
     generate_report,
     get_cached_cookies,
     load_and_set_env_local,
+    read_deploy_payload,
     read_script_content,
     save_cookies_to_env_local,
     validate_cookie_expiration,
@@ -1370,7 +1372,8 @@ class PipedreamSyncer:
 
             try:
                 # Read expected code from local file
-                expected_code = read_script_content(script_path, base_path)
+                # Compare against what we actually deploy, not the source on disk.
+                expected_code = read_deploy_payload(script_path, base_path)
 
                 # Close any open panel first
                 await self.close_step_panel()
@@ -1471,8 +1474,14 @@ class PipedreamSyncer:
         workflow_id: str,
         step: StepConfig,
         base_path: Path,
+        code: Optional[str] = None,
     ) -> StepResult:
-        """Sync a single step's code."""
+        """Sync a single step's code.
+
+        `code` is the already-validated payload from sync_workflow's preflight
+        pass. Falling back to a fresh read_deploy_payload keeps this callable
+        on its own (tests, other callers) without re-plumbing every caller.
+        """
         start_time = time.time()
         step_name = step.step_name
         script_path = step.script_path
@@ -1489,7 +1498,7 @@ class PipedreamSyncer:
             )
 
         try:
-            new_code = read_script_content(script_path, base_path)
+            new_code = code if code is not None else read_deploy_payload(script_path, base_path)
 
             # Close any previously open step panel FIRST
             await self.close_step_panel()
@@ -1561,10 +1570,24 @@ class PipedreamSyncer:
             return result
 
         try:
+            # Preflight every step's deploy payload before any browser mutation.
+            # A late ValueError (oversized payload) must abort the whole workflow
+            # here, before navigate_to_workflow -- otherwise earlier steps get
+            # updated in the browser while this one fails, and the deploy_workflow()
+            # call below still fires over that partial state, publishing the
+            # oversized step's stale code. The validated payloads are reused
+            # below so each step's code is read from disk exactly once.
+            prepared_payloads = {
+                step.step_name: read_deploy_payload(step.script_path, base_path)
+                for step in workflow.steps
+            }
+
             await self.navigate_to_workflow(workflow.id)
 
             for step in workflow.steps:
-                step_result = await self.sync_step(workflow.id, step, base_path)
+                step_result = await self.sync_step(
+                    workflow.id, step, base_path, code=prepared_payloads[step.step_name]
+                )
                 result.steps.append(step_result)
 
                 # Print status
@@ -1602,7 +1625,7 @@ class PipedreamSyncer:
                     )
                     print(f"    X {workflow_key} deploy not confirmed: {result.error}")
 
-        except (NavigationError, AuthenticationError) as e:
+        except (NavigationError, AuthenticationError, ValueError, FileNotFoundError) as e:
             result.status = "failed"
             result.error = str(e)
             self.log(f"    Failed: {e}", "error")

@@ -86,6 +86,24 @@ class TestSyncWorkflowDryRun:
 class TestSyncWorkflowNavigation:
     """Test sync_workflow navigation handling."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_deploy_payload(self):
+        """ENG-1980: sync_workflow preflights read_deploy_payload for EVERY step
+        before it touches the browser, so a step whose payload is oversize aborts
+        the whole workflow instead of leaving earlier steps already pasted.
+
+        These tests drive sync_workflow with fixture script paths that do not
+        exist on disk, so the real read raises "script not found" before the
+        behaviour under test ever runs. Stubbing it here isolates that behaviour;
+        the preflight itself is covered by
+        test_headless_deploy.py::test_preflight_lists_all_missing_workflow_ids_before_browser
+        and the size gate by
+        test_utils.py::TestDeployPayload::test_oversize_payload_is_rejected_with_the_byte_count.
+        """
+        with patch("src.deploy.deploy_to_pipedream.read_deploy_payload",
+                   return_value="x = 1\n"):
+            yield
+
     @pytest.mark.asyncio
     async def test_sync_workflow_navigation_error(self, mock_config):
         """Test sync_workflow returns failed when navigation fails."""
@@ -119,6 +137,24 @@ class TestSyncWorkflowNavigation:
 
 class TestSyncWorkflowStepHandling:
     """Test sync_workflow handles step results correctly."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_deploy_payload(self):
+        """ENG-1980: sync_workflow preflights read_deploy_payload for EVERY step
+        before it touches the browser, so a step whose payload is oversize aborts
+        the whole workflow instead of leaving earlier steps already pasted.
+
+        These tests drive sync_workflow with fixture script paths that do not
+        exist on disk, so the real read raises "script not found" before the
+        behaviour under test ever runs. Stubbing it here isolates that behaviour;
+        the preflight itself is covered by
+        test_headless_deploy.py::test_preflight_lists_all_missing_workflow_ids_before_browser
+        and the size gate by
+        test_utils.py::TestDeployPayload::test_oversize_payload_is_rejected_with_the_byte_count.
+        """
+        with patch("src.deploy.deploy_to_pipedream.read_deploy_payload",
+                   return_value="x = 1\n"):
+            yield
 
     @pytest.mark.asyncio
     async def test_sync_workflow_mixed_step_results(self, mock_config):
@@ -186,6 +222,24 @@ class TestSyncWorkflowStepHandling:
 
 class TestSyncWorkflowDeployment:
     """Test sync_workflow deployment behavior."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_deploy_payload(self):
+        """ENG-1980: sync_workflow preflights read_deploy_payload for EVERY step
+        before it touches the browser, so a step whose payload is oversize aborts
+        the whole workflow instead of leaving earlier steps already pasted.
+
+        These tests drive sync_workflow with fixture script paths that do not
+        exist on disk, so the real read raises "script not found" before the
+        behaviour under test ever runs. Stubbing it here isolates that behaviour;
+        the preflight itself is covered by
+        test_headless_deploy.py::test_preflight_lists_all_missing_workflow_ids_before_browser
+        and the size gate by
+        test_utils.py::TestDeployPayload::test_oversize_payload_is_rejected_with_the_byte_count.
+        """
+        with patch("src.deploy.deploy_to_pipedream.read_deploy_payload",
+                   return_value="x = 1\n"):
+            yield
 
     @pytest.mark.asyncio
     async def test_sync_workflow_deploys_on_success(self, mock_config):
@@ -481,6 +535,24 @@ class TestSyncStepStatusCodes:
 
 class TestWorkflowStatusAggregation:
     """Test how workflow status is determined from step results."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_deploy_payload(self):
+        """ENG-1980: sync_workflow preflights read_deploy_payload for EVERY step
+        before it touches the browser, so a step whose payload is oversize aborts
+        the whole workflow instead of leaving earlier steps already pasted.
+
+        These tests drive sync_workflow with fixture script paths that do not
+        exist on disk, so the real read raises "script not found" before the
+        behaviour under test ever runs. Stubbing it here isolates that behaviour;
+        the preflight itself is covered by
+        test_headless_deploy.py::test_preflight_lists_all_missing_workflow_ids_before_browser
+        and the size gate by
+        test_utils.py::TestDeployPayload::test_oversize_payload_is_rejected_with_the_byte_count.
+        """
+        with patch("src.deploy.deploy_to_pipedream.read_deploy_payload",
+                   return_value="x = 1\n"):
+            yield
 
     @pytest.mark.asyncio
     async def test_workflow_success_when_all_steps_succeed(self, mock_config):

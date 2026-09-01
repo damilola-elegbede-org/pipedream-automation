@@ -672,3 +672,160 @@ class TestCheckPipedreamAPISupport:
 
             assert result["supports_code_update"] is False
             assert "Docs structure may have changed" in result["message"]
+
+
+class TestDeployPayloadSizeLimit:
+    """Pipedream stores step code in a 65,535-byte MySQL TEXT column.
+
+    Over it, the editor still accepts the paste, the workflow strands in
+    DEPLOY PENDING, and the only trace is `Mysql2::Error: Data too long for
+    column 'code'` inside the step's Test panel. That cost an afternoon on
+    the horizon scorer at 67,795 bytes (ENG-1980).
+    """
+
+    def test_strip_preserves_semantics_exactly(self, tmp_path):
+        import ast
+        from src.deploy.utils import strip_for_deploy
+
+        src = (
+            '"""Module docstring."""\n'
+            "# a leading comment\n"
+            "import os\n\n\n"
+            "class C:\n"
+            '    """Only statement — must not be emptied."""\n\n'
+            "def f(a, b=2):\n"
+            '    """Doc."""\n'
+            "    # inline reasoning\n"
+            "    s = 'keep  this   spacing'\n"
+            "    return a + b + len(s) + len(os.sep)\n"
+        )
+        out = strip_for_deploy(src)
+
+        def norm(text):
+            tree = ast.parse(text)
+            for node in ast.walk(tree):
+                body = getattr(node, "body", None)
+                if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef)) and body:
+                    first = body[0]
+                    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
+                            and isinstance(first.value.value, str):
+                        node.body = body[1:] or [ast.Pass()]
+            return ast.dump(ast.fix_missing_locations(tree))
+
+        assert norm(out) == norm(src), "stripping changed program semantics"
+        assert "a leading comment" not in out
+        assert "keep  this   spacing" in out, "string literals must survive byte-for-byte"
+
+    def test_class_whose_only_statement_is_a_docstring_still_parses(self):
+        from src.deploy.utils import strip_for_deploy
+        compile(strip_for_deploy('class C:\n    """only."""\n'), "<t>", "exec")
+
+    def test_adjacent_string_literal_docstring_is_fully_removed(self):
+        from src.deploy.utils import strip_for_deploy
+
+        src = (
+            'def f():\n'
+            '    "first" "second"\n'
+            "    return 1\n"
+        )
+        out = strip_for_deploy(src)
+        assert "first" not in out
+        assert "second" not in out
+        assert out.strip().endswith("return 1")
+
+    def test_parenthesized_string_literal_docstring_is_fully_removed(self):
+        from src.deploy.utils import strip_for_deploy
+
+        src = (
+            'def f():\n'
+            '    ("first"\n'
+            '     "second")\n'
+            "    return 1\n"
+        )
+        out = strip_for_deploy(src)
+        assert "first" not in out
+        assert "second" not in out
+        compile(out, "<t>", "exec")
+
+    def test_multiline_string_trailing_spaces_survive_cleanup(self):
+        from src.deploy.utils import strip_for_deploy
+
+        src = "value = '''first with spaces  \n\nsecond'''\n"
+        out = strip_for_deploy(src)
+
+        namespace = {}
+        exec(out, namespace)
+        assert namespace["value"] == "first with spaces  \n\nsecond"
+
+    def test_multiline_string_blank_lines_are_not_collapsed(self):
+        from src.deploy.utils import strip_for_deploy
+
+        src = "value = '''first\n\n\nsecond'''\n"
+        out = strip_for_deploy(src)
+
+        namespace = {}
+        exec(out, namespace)
+        assert namespace["value"] == "first\n\n\nsecond"
+
+    def test_cleanup_still_collapses_blank_lines_outside_strings(self):
+        from src.deploy.utils import strip_for_deploy
+
+        src = "a = 1\n\n\n\nb = 2   \n"
+        out = strip_for_deploy(src)
+        assert "\n\n\n" not in out
+        assert "b = 2   " not in out, "trailing spaces outside strings must still be trimmed"
+
+    def test_oversize_payload_is_rejected_with_the_byte_count(self, tmp_path):
+        import pytest
+        from src.deploy.utils import (
+            PIPEDREAM_CODE_BYTE_LIMIT,
+            build_deploy_header,
+            read_deploy_payload,
+            strip_for_deploy,
+        )
+
+        src = "X = '" + ("a" * (PIPEDREAM_CODE_BYTE_LIMIT + 5000)) + "'\n"
+        big = tmp_path / "big.py"
+        big.write_text(src)
+
+        pasted_size = len((build_deploy_header() + strip_for_deploy(src)).encode("utf-8"))
+        overage = pasted_size - PIPEDREAM_CODE_BYTE_LIMIT
+
+        with pytest.raises(ValueError, match="step-code limit") as error:
+            read_deploy_payload("big.py", tmp_path)
+
+        message = str(error.value)
+        assert f"{pasted_size:,}" in message
+        assert f"step-code limit by {overage:,}" in message
+
+    def test_payload_under_limit_alone_but_over_limit_after_header_is_rejected(self, tmp_path):
+        import pytest
+        from src.deploy.utils import (
+            PIPEDREAM_CODE_BYTE_LIMIT,
+            build_deploy_header,
+            read_deploy_payload,
+            strip_for_deploy,
+        )
+
+        header_len = len(build_deploy_header().encode("utf-8"))
+
+        # Stripped size alone fits under the limit, but the header pushes the
+        # pasted total over it -- the exact gap a payload-only check would miss.
+        filler = "a" * (PIPEDREAM_CODE_BYTE_LIMIT - header_len + 10)
+        src = f"X = '{filler}'\n"
+        script = tmp_path / "boundary.py"
+        script.write_text(src)
+
+        stripped_size = len(strip_for_deploy(src).encode("utf-8"))
+        assert stripped_size < PIPEDREAM_CODE_BYTE_LIMIT, "payload alone must fit before the header"
+        assert header_len + stripped_size > PIPEDREAM_CODE_BYTE_LIMIT, "header must push it over"
+
+        with pytest.raises(ValueError, match="step-code limit"):
+            read_deploy_payload("boundary.py", tmp_path)
+
+    def test_read_script_content_stays_verbatim(self, tmp_path):
+        from src.deploy.utils import read_script_content
+        p = tmp_path / "s.py"
+        body = '# comment kept\n"""doc kept."""\nx = 1\n'
+        p.write_text(body)
+        assert read_script_content("s.py", tmp_path) == body
