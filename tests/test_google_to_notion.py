@@ -154,3 +154,85 @@ class TestHandler:
         assert mock_pd.flow.exit_called is True
         assert "Could not reliably extract" in mock_pd.flow.exit_message
 
+
+
+class TestNotionDomainCutover:
+    """ENG-2091: the reverse sync was dead from 2026-05-10 to 2026-09-01.
+
+    The guard tested for the literal string "notion.so/". Notion changed the
+    `url` property it returns from https://www.notion.so/... to
+    https://app.notion.com/p/..., and notion_task_to_google.py writes that
+    value verbatim into the task notes. Every task created after the cutover
+    failed the guard and the workflow exited at step 1.
+
+    Measured on D's Default List: 69 tasks with notion.so notes (due
+    2022-09-17 -> 2026-05-10) and 58 with notion.com notes (2026-05-10 ->
+    2026-09-27), of which 39 were open and invisible to the sync.
+
+    WHY IT SURVIVED 16 WEEKS: every fixture in this file hardcoded
+    www.notion.so, so the suite passed green over a guard that rejected 100%
+    of current production input. These tests cover BOTH domains for exactly
+    that reason — a fix asserted only against the old form can regress
+    identically.
+    """
+
+    # The real notes body of Google task bWY2RkhzMHZla1pnTkVjVA, completed in
+    # Google 2026-08-18 and still reading In Progress in Notion 13 days later.
+    APP_NOTION_NOTES = (
+        "Notion Task: Notify Heather and Toby that Fri Aug 21 SCF lessons are cancelled\n"
+        "Link: https://app.notion.com/p/Notify-Heather-and-Toby-"
+        "3be48b0cacbf8155a353cf5575eaf3c1"
+    )
+    LEGACY_NOTES = (
+        "Notion Task: Legacy task\n"
+        "Link: https://www.notion.so/Legacy-Page-3be48b0cacbf8155a353cf5575eaf3c1"
+    )
+
+    def _trigger(self, notes, status="needsAction"):
+        return {"trigger": {"event": {
+            "title": "T", "notes": notes, "status": status, "due": "2026-08-21T00:00:00.000Z",
+        }}}
+
+    def test_app_notion_com_is_not_skipped(self, mock_pd):
+        """The regression itself: this exited at step 1 for 16 weeks."""
+        mock_pd.steps = self._trigger(self.APP_NOTION_NOTES)
+        result = handler(mock_pd)
+        assert mock_pd.flow.exit_called is False, (
+            "an app.notion.com task must not be skipped as 'no Notion URL'"
+        )
+        assert result["NotionUpdate"]["PageId"] == "3be48b0cacbf8155a353cf5575eaf3c1"
+
+    def test_legacy_notion_so_still_works(self, mock_pd):
+        """69 pre-cutover tasks still carry the old domain."""
+        mock_pd.steps = self._trigger(self.LEGACY_NOTES)
+        result = handler(mock_pd)
+        assert mock_pd.flow.exit_called is False
+        assert result["NotionUpdate"]["PageId"] == "3be48b0cacbf8155a353cf5575eaf3c1"
+
+    def test_a_task_with_no_notion_link_is_still_skipped(self, mock_pd):
+        """The guard must still do its job — this is not a blanket pass."""
+        mock_pd.steps = self._trigger("Just a plain task, no link at all")
+        handler(mock_pd)
+        assert mock_pd.flow.exit_called is True
+        assert "does not have a Notion URL" in mock_pd.flow.exit_message
+
+    def test_completing_sets_status_as_well_as_list(self, mock_pd):
+        """ENG-2091 second defect: List moved, Status did not, leaving
+        half-closed tasks. 7 were fixed by hand."""
+        mock_pd.steps = self._trigger(self.APP_NOTION_NOTES, status="completed")
+        result = handler(mock_pd)
+        assert result["NotionUpdate"]["ListValue"] == "Completed"
+        assert result["NotionUpdate"]["StatusValue"] == "Done"
+
+    def test_incomplete_leaves_status_untouched(self, mock_pd):
+        """Google has two states, Notion has four. Mapping needsAction onto one
+        of them would overwrite a deliberate Not Started or Archived."""
+        mock_pd.steps = self._trigger(self.APP_NOTION_NOTES, status="needsAction")
+        result = handler(mock_pd)
+        assert result["NotionUpdate"]["ListValue"] == "Next Actions"
+        assert result["NotionUpdate"]["StatusValue"] is None
+
+    def test_extractor_resolves_both_domains(self):
+        """The extractor was always domain-agnostic; only the guard was not."""
+        for notes in (self.APP_NOTION_NOTES, self.LEGACY_NOTES):
+            assert extract_notion_page_id(notes) == "3be48b0cacbf8155a353cf5575eaf3c1"

@@ -61,6 +61,21 @@ def safe_get(data, keys, default=None):
     return current
 
 
+# ENG-2091: both domains. Notion changed its `url` property from
+# https://www.notion.so/... to https://app.notion.com/p/... on 2026-05-10;
+# notion_task_to_google.py writes that value verbatim into the task notes.
+# A literal "notion.so/" test made the reverse sync exit at step 1 for every
+# task created after the cutover — 39 open tasks, dead for 16 weeks.
+NOTION_URL_PATTERN = re.compile(r"https?://[^\s]*notion\.(?:so|com)/", re.IGNORECASE)
+
+
+def is_notion_linked(text: str) -> bool:
+    """True when `text` carries a Notion URL of either domain."""
+    if not text:
+        return False
+    return bool(NOTION_URL_PATTERN.search(text))
+
+
 def extract_notion_page_id(text):
     """
     Extracts the Notion Page ID from text containing a Notion URL.
@@ -82,11 +97,15 @@ def extract_notion_page_id(text):
     if match:
         return match.group(1)
 
-    # Fallback: try extracting after last hyphen if there's a notion.so URL
+    # Fallback: try extracting after the last hyphen of a Notion URL.
+    # ENG-2091: matches notion.so AND app.notion.com. This path is currently
+    # unreachable (NOTION_PAGE_ID_PATTERN resolves both forms above), but it
+    # carried the same domain assumption as the guard and would reintroduce
+    # the defect the moment the pattern changed.
     try:
-        if "notion.so/" in text:
+        if "notion.so/" in text or "notion.com/" in text:
             # Find the URL portion
-            url_match = re.search(r'https?://[^\s]+notion\.so/[^\s]+', text)
+            url_match = re.search(r'https?://[^\s]+notion\.(?:so|com)/[^\s]+', text)
             if url_match:
                 url = url_match.group(0)
                 # Remove query params
@@ -161,8 +180,21 @@ def handler(pd: "pipedream"):  # noqa: F821
     notes = safe_get(task_data, ["notes"])
     task_title = safe_get(task_data, ["title"], default="Untitled Task")
 
-    # Check if notes contain a Notion URL
-    if not notes or "notion.so/" not in notes:
+    # Check if notes contain a Notion URL.
+    #
+    # ENG-2091: this used to test for the literal "notion.so/". Notion changed
+    # the `url` property it returns from https://www.notion.so/... to
+    # https://app.notion.com/p/..., and notion_task_to_google.py writes that
+    # value verbatim into the task notes. Every task created after the
+    # 2026-05-10 cutover failed this guard and the workflow exited at step 1,
+    # so the reverse sync has been dead since. 39 open Google tasks were
+    # invisible to it; completing one in Google never reached Notion.
+    #
+    # The guard asks only "is this a Notion-linked task at all", across BOTH
+    # domains. It deliberately does NOT validate the page id: step 2 does that
+    # and exits with a different message, and collapsing the two would report
+    # a task whose link is malformed as one that simply has no link.
+    if not notes or not is_notion_linked(notes):
         exit_message = f"Task '{task_title}' does not have a Notion URL in notes. Skipping."
         logger.info(exit_message)
         pd.flow.exit(exit_message)
@@ -192,7 +224,24 @@ def handler(pd: "pipedream"):  # noqa: F821
     else:
         list_value = "Next Actions"
 
-    logger.info(f"Mapped to Notion List value: {list_value}")
+    # ENG-2091: GTD Tasks carries Status (Not Started / In Progress / Done /
+    # Archived) and List (Inbox / Someday-Maybe / Next Actions / Waiting For /
+    # Completed / Reference) as SEPARATE properties, and every Done task in the
+    # database has both set. Returning only List meant a Google check-off moved
+    # List -> Completed and left Status at In Progress, which is how 7 orphans
+    # ended up half-closed and were fixed by hand.
+    #
+    # Status is emitted ONLY on completion. The un-completing direction is
+    # deliberately left absent rather than guessed: Google Tasks has two states
+    # and Notion has four, so mapping "needsAction" onto one of them would
+    # overwrite a deliberate "Not Started" or "Archived" with an invention.
+    # Absent means the downstream action leaves the property alone.
+    status_value = "Done" if task_status == "completed" else None
+
+    logger.info(
+        f"Mapped to Notion List value: {list_value}"
+        + (f", Status: {status_value}" if status_value else ", Status: unchanged")
+    )
 
     # --- 4. Extract Due Date ---
     due_date = safe_get(task_data, ["due"])
@@ -204,6 +253,8 @@ def handler(pd: "pipedream"):  # noqa: F821
         "NotionUpdate": {
             "PageId": page_id,
             "ListValue": list_value,  # For Notion "List" field
+            # ENG-2091. None when the task is not completed — see above.
+            "StatusValue": status_value,  # For Notion "Status" field
             "DueDate": {
                 "start": notion_due_date,
                 "end": None
