@@ -1782,6 +1782,17 @@ class PipedreamSyncer:
             if Path(step_name).name != step_name or step_name in {"", ".", ".."}:
                 raise PipedreamSyncError(f"Unsafe step name for pull output: {step_name!r}")
 
+            # Two workflows can configure steps with the same step_name; a
+            # flat pulled_dir would let the later pull overwrite the earlier
+            # one and diff against the wrong deployed step. Namespace by
+            # workflow_id, applying the same path-escape check as step_name.
+            if Path(workflow_id).name != workflow_id or workflow_id in {"", ".", ".."}:
+                raise PipedreamSyncError(f"Unsafe workflow id for pull output: {workflow_id!r}")
+
+            workflow_pulled_dir = pulled_dir / workflow_id
+            workflow_pulled_dir.mkdir(parents=True, exist_ok=True)
+            pulled_path = workflow_pulled_dir / f"{step_name}.py"
+
             await self.close_step_panel()
             await self.find_and_click_step(step_name)
             await self.click_code_tab()
@@ -1804,7 +1815,7 @@ class PipedreamSyncer:
                     expected_payload.splitlines(keepends=True),
                     deployed_code.splitlines(keepends=True),
                     fromfile=f"{step.script_path} (stripped payload)",
-                    tofile=str(Path(".tmp") / "pulled" / pulled_path.name),
+                    tofile=str(pulled_path.relative_to(base_path)),
                 )
             )
 

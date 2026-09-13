@@ -141,7 +141,8 @@ async def test_pull_only_different_content_prints_unified_diff_and_exits_nonzero
     assert [result.status for result in results] == ["different"]
     output = capsys.readouterr().out
     assert "--- scripts/step.py" in output
-    assert "+++ .tmp/pulled/step.py" in output
+    # workflow-scoped: pull_config()'s workflow id is "workflow-p_123"
+    assert "+++ .tmp/pulled/workflow-p_123/step.py" in output
     assert "-    return 'local'" in output
     assert "+    return 'deployed'" in output
     sync_step.assert_not_called()
