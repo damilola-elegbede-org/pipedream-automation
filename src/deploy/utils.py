@@ -6,6 +6,7 @@ import base64
 import datetime
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -366,6 +367,23 @@ def build_deploy_header() -> str:
     """
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"# Deployed by pipedream-automation\n# Timestamp: {timestamp}\n\n"
+
+
+DEPLOY_HEADER_RE = re.compile(
+    r"^# Deployed by pipedream-automation\n# Timestamp: [^\n]*\n\n"
+)
+
+
+def strip_deploy_header(code: str) -> str:
+    """Inverse of build_deploy_header: drop the timestamped header a pull
+    reads back, so comparing against read_deploy_payload's stripped source
+    isn't defeated by a timestamp that is different on every deploy.
+
+    Matches build_deploy_header()'s exact format; code with no matching
+    header (e.g. a step never deployed by this tool) is returned unchanged
+    so drift is still reported rather than silently swallowed.
+    """
+    return DEPLOY_HEADER_RE.sub("", code, count=1)
 
 
 def read_deploy_payload(script_path: str, base_path: Optional[Path] = None) -> str:

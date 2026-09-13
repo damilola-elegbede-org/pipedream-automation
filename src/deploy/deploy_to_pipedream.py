@@ -78,6 +78,7 @@ from .utils import (  # noqa: F401
     read_deploy_payload,
     read_script_content,
     save_cookies_to_env_local,
+    strip_deploy_header,
     validate_cookie_expiration,
 )
 
@@ -1759,13 +1760,22 @@ class PipedreamSyncer:
             pulled_code = await self.read_code()
 
             pulled_path.write_text(pulled_code, encoding="utf-8")
-            local_path = base_path / step.script_path
-            local_code = local_path.read_text(encoding="utf-8")
+
+            # Compare against what deploy actually PASTES, not the raw source on
+            # disk: sync_step deploys build_deploy_header() + strip_for_deploy(
+            # source) (see read_deploy_payload), stripping comments/docstrings.
+            # A byte-for-byte diff against the raw file would report drift on
+            # every step this tool has ever deployed. read_deploy_payload also
+            # carries the path-containment check read_script_content applies —
+            # do not read step.script_path directly here.
+            expected_payload = read_deploy_payload(step.script_path, base_path)
+            deployed_code = strip_deploy_header(pulled_code)
+
             diff = "".join(
                 difflib.unified_diff(
-                    local_code.splitlines(keepends=True),
-                    pulled_code.splitlines(keepends=True),
-                    fromfile=step.script_path,
+                    expected_payload.splitlines(keepends=True),
+                    deployed_code.splitlines(keepends=True),
+                    fromfile=f"{step.script_path} (stripped payload)",
                     tofile=str(Path(".tmp") / "pulled" / pulled_path.name),
                 )
             )

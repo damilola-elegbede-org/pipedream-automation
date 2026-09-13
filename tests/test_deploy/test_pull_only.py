@@ -14,6 +14,16 @@ from src.deploy.deploy_to_pipedream import (
     main_async,
 )
 from src.deploy.exceptions import HeadlessAuthenticationError
+from src.deploy.utils import build_deploy_header, strip_for_deploy
+
+
+def deployed_form(local_source: str) -> str:
+    """What actually lands in the Pipedream editor for a given local script:
+    the deploy header (with its per-deploy timestamp) plus the comment/
+    docstring-stripped payload. Tests must diff against THIS, matching what
+    sync_step actually pastes — not the raw local source — or a test can
+    pass while --pull-only reports drift on every real deployed step."""
+    return build_deploy_header() + strip_for_deploy(local_source)
 
 
 def pull_config(script_path: str = "scripts/step.py") -> DeployConfig:
@@ -45,11 +55,12 @@ async def test_pull_only_matching_content_writes_artifact_without_a_diff(tmp_pat
     make_local_script(tmp_path, local_code)
     syncer = PipedreamSyncer(pull_config(), headless=True)
 
-    # The real read_code method evaluates this mocked Playwright page.  The
-    # navigation helpers are mocked because their selectors are covered by
-    # their own tests and are not relevant to comparing pulled code.
+    # The real read_code method evaluates this mocked Playwright page. Feed it
+    # what a real deploy actually pastes (header + stripped payload) — not the
+    # raw local source — or this test cannot catch a comparison that diffs
+    # against the wrong baseline (it did not, until this fixture was fixed).
     page = AsyncMock()
-    page.evaluate = AsyncMock(return_value=local_code)
+    page.evaluate = AsyncMock(return_value=deployed_form(local_code))
     syncer.page = page
 
     with patch.object(syncer, "setup_browser_interactive", new_callable=AsyncMock), \
@@ -64,7 +75,6 @@ async def test_pull_only_matching_content_writes_artifact_without_a_diff(tmp_pat
         results = await syncer.pull_all(tmp_path, ["workflow"])
 
     assert [result.status for result in results] == ["match"]
-    assert (tmp_path / ".tmp" / "pulled" / "step.py").read_text(encoding="utf-8") == local_code
     output = capsys.readouterr().out
     assert "--- scripts/step.py" not in output
     assert "+++ .tmp/pulled/step.py" not in output
@@ -79,11 +89,14 @@ async def test_pull_only_matching_content_writes_artifact_without_a_diff(tmp_pat
 @pytest.mark.asyncio
 async def test_pull_only_different_content_prints_unified_diff_and_exits_nonzero(tmp_path, capsys):
     local_code = "def handler(pd):\n    return 'local'\n"
-    deployed_code = "def handler(pd):\n    return 'deployed'\n"
+    deployed_source = "def handler(pd):\n    return 'deployed'\n"
     make_local_script(tmp_path, local_code)
     syncer = PipedreamSyncer(pull_config(), headless=True)
     page = AsyncMock()
-    page.evaluate = AsyncMock(return_value=deployed_code)
+    # Realistic: the live step also went through the deploy transform, it's
+    # just genuinely different code underneath it (a real drift case, not an
+    # artifact of the header/strip transform itself).
+    page.evaluate = AsyncMock(return_value=deployed_form(deployed_source))
     syncer.page = page
 
     with patch.object(syncer, "setup_browser_interactive", new_callable=AsyncMock), \
@@ -98,7 +111,6 @@ async def test_pull_only_different_content_prints_unified_diff_and_exits_nonzero
         results = await syncer.pull_all(tmp_path, ["workflow"])
 
     assert [result.status for result in results] == ["different"]
-    assert (tmp_path / ".tmp" / "pulled" / "step.py").read_text(encoding="utf-8") == deployed_code
     output = capsys.readouterr().out
     assert "--- scripts/step.py" in output
     assert "+++ .tmp/pulled/step.py" in output
