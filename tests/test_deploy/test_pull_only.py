@@ -26,6 +26,22 @@ def deployed_form(local_source: str) -> str:
     return build_deploy_header() + strip_for_deploy(local_source)
 
 
+def evaluate_side_effect(deployed_code: str):
+    """Route the real read_code method's several page.evaluate calls: the
+    editor-locate probe gets a truthy marker-found result, the clipboard
+    read gets the deployed code, and cleanup calls (remove attribute, clear
+    clipboard) get None — the same shape a real Playwright page returns."""
+
+    async def _side_effect(script, *args, **kwargs):
+        if "clipboard.readText" in script:
+            return deployed_code
+        if "querySelectorAll" in script:
+            return True
+        return None
+
+    return _side_effect
+
+
 def pull_config(script_path: str = "scripts/step.py") -> DeployConfig:
     """A one-step config used by pull tests."""
     return DeployConfig(
@@ -60,7 +76,11 @@ async def test_pull_only_matching_content_writes_artifact_without_a_diff(tmp_pat
     # raw local source — or this test cannot catch a comparison that diffs
     # against the wrong baseline (it did not, until this fixture was fixed).
     page = AsyncMock()
-    page.evaluate = AsyncMock(return_value=deployed_form(local_code))
+    page.evaluate = AsyncMock(side_effect=evaluate_side_effect(deployed_form(local_code)))
+    # Real Playwright's page.locator() is synchronous (only the returned
+    # locator's actions are awaitable) — AsyncMock would wrongly make the
+    # call itself a coroutine.
+    page.locator = MagicMock(return_value=AsyncMock())
     syncer.page = page
 
     with patch.object(syncer, "setup_browser_interactive", new_callable=AsyncMock), \
@@ -78,7 +98,14 @@ async def test_pull_only_matching_content_writes_artifact_without_a_diff(tmp_pat
     output = capsys.readouterr().out
     assert "--- scripts/step.py" not in output
     assert "+++ .tmp/pulled/step.py" not in output
-    page.evaluate.assert_awaited_once()
+    page.evaluate.assert_any_await("navigator.clipboard.readText()")
+    # Mutation guards: read_code must select-all + copy (reads the editor's
+    # document model, unaffected by virtualization) and must never paste —
+    # a switch to paste would make this a write path, not a read.
+    pressed_keys = [call.args[0] for call in page.keyboard.press.await_args_list]
+    assert "ControlOrMeta+KeyA" in pressed_keys
+    assert "ControlOrMeta+KeyC" in pressed_keys
+    assert "ControlOrMeta+KeyV" not in pressed_keys
     # These are mutation guards: changing the pull path to delegate to a sync
     # method makes this test fail rather than merely relying on code review.
     sync_step.assert_not_called()
@@ -96,7 +123,8 @@ async def test_pull_only_different_content_prints_unified_diff_and_exits_nonzero
     # Realistic: the live step also went through the deploy transform, it's
     # just genuinely different code underneath it (a real drift case, not an
     # artifact of the header/strip transform itself).
-    page.evaluate = AsyncMock(return_value=deployed_form(deployed_source))
+    page.evaluate = AsyncMock(side_effect=evaluate_side_effect(deployed_form(deployed_source)))
+    page.locator = MagicMock(return_value=AsyncMock())
     syncer.page = page
 
     with patch.object(syncer, "setup_browser_interactive", new_callable=AsyncMock), \

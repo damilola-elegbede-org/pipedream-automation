@@ -338,9 +338,13 @@ class PipedreamSyncer:
                 # paths.  Pull-only mode passes cache_cookies=False above.
                 try:
                     cookies = await self.context.cookies()
+                    def _is_pipedream_domain(domain: str) -> bool:
+                        host = domain.lstrip(".")
+                        return host == "pipedream.com" or host.endswith(".pipedream.com")
+
                     pipedream_cookies = [
                         c for c in cookies
-                        if "pipedream.com" in c.get("domain", "")
+                        if _is_pipedream_domain(c.get("domain", ""))
                     ]
                     if pipedream_cookies:
                         save_cookies_to_env_local(pipedream_cookies)
@@ -1020,17 +1024,20 @@ class PipedreamSyncer:
         self.log("Code update complete", "info")
 
     async def read_code(self) -> str:
-        """Read the largest visible Pipedream code editor without modifying it.
+        """Read the full source from the largest visible Pipedream code editor.
 
-        Pipedream currently uses CodeMirror 6, but older editor variants can
-        still appear while a workflow is loading.  This mirrors update_code's
-        visible-editor selection and reads the editor DOM only; it never
-        focuses the editor, sends keys, uses the clipboard, or saves.
+        CodeMirror 6 and Monaco virtualize their rendered DOM: for any step
+        longer than the editor viewport, `.cm-content` / `.view-lines`
+        innerText only contains the lines currently drawn, silently
+        truncating the result. Select-all + copy pulls from the editor's
+        underlying document model instead of the rendered DOM, so it returns
+        the complete source regardless of virtualization -- the same
+        technique the post-deploy verification step below already relies on.
         """
         if not self.page:
             raise CodeUpdateError("Browser not initialized")
 
-        code = await self.page.evaluate("""
+        editor_found = await self.page.evaluate("""
             () => {
                 const selectors = ['.cm-editor', '.monaco-editor', '.CodeMirror'];
                 let bestEditor = null;
@@ -1049,18 +1056,39 @@ class PipedreamSyncer:
                     }
                 }
 
-                if (!bestEditor) return null;
-                const content = bestEditor.querySelector(
-                    '.cm-content, .view-lines, .CodeMirror-code'
-                );
-                // innerText preserves visual line breaks; textContent is a
-                // fallback for headless/editor implementations without it.
-                return content ? (content.innerText ?? content.textContent ?? '') : '';
+                if (!bestEditor) return false;
+                bestEditor.setAttribute('data-read-target', 'true');
+                return true;
             }
         """)
 
-        if not isinstance(code, str):
+        if not editor_found:
             raise CodeUpdateError("No visible editor found to read")
+
+        try:
+            target = self.page.locator('[data-read-target="true"]')
+            await target.click(timeout=5000)
+            await asyncio.sleep(0.2)
+
+            await self.page.keyboard.press("ControlOrMeta+KeyA")
+            await asyncio.sleep(0.2)
+            await self.page.keyboard.press("ControlOrMeta+KeyC")
+            await asyncio.sleep(0.3)
+
+            code = await self.page.evaluate("navigator.clipboard.readText()")
+        finally:
+            await self.page.evaluate("""
+                () => {
+                    const el = document.querySelector('[data-read-target]');
+                    if (el) el.removeAttribute('data-read-target');
+                }
+            """)
+            # Security: clear the clipboard so the step's source doesn't
+            # linger there after the read (mirrors update_code's cleanup).
+            await self.page.evaluate("() => navigator.clipboard.writeText('')")
+
+        if not isinstance(code, str):
+            raise CodeUpdateError("Could not read code from visible editor")
         return code
 
     async def wait_for_save(self) -> bool:
