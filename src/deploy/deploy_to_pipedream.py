@@ -23,6 +23,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -1070,12 +1071,29 @@ class PipedreamSyncer:
             await target.click(timeout=5000)
             await asyncio.sleep(0.2)
 
+            # Security: a keyboard copy can complete without the browser
+            # actually firing the copy event (e.g. the editor lost focus),
+            # in which case readText() below would silently return whatever
+            # was already on the clipboard -- potentially unrelated, sensitive
+            # content that then gets written to the pulled artifact and
+            # printed in the diff. Seed a sentinel first so a no-op copy is
+            # detectable instead of read as real code.
+            sentinel = f"__read_code_sentinel_{uuid.uuid4().hex}__"
+            await self.page.evaluate(
+                "(text) => navigator.clipboard.writeText(text)", sentinel
+            )
+
             await self.page.keyboard.press("ControlOrMeta+KeyA")
             await asyncio.sleep(0.2)
             await self.page.keyboard.press("ControlOrMeta+KeyC")
             await asyncio.sleep(0.3)
 
             code = await self.page.evaluate("navigator.clipboard.readText()")
+            if code == sentinel:
+                raise CodeUpdateError(
+                    "Copy operation did not update the clipboard; refusing to "
+                    "read stale clipboard content"
+                )
         finally:
             await self.page.evaluate("""
                 () => {

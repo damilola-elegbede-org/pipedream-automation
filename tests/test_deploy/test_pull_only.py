@@ -150,6 +150,59 @@ async def test_pull_only_different_content_prints_unified_diff_and_exits_nonzero
     wait_for_save.assert_not_called()
 
 
+def stale_clipboard_side_effect():
+    """Simulate a keyboard copy that never fires: read_code's sentinel
+    writeText() lands, but the follow-up readText() still returns that same
+    sentinel instead of newly-copied editor text -- exactly what a real
+    Playwright page returns when the copy keypress silently no-ops."""
+    seeded = {"value": None}
+
+    async def _side_effect(script, *args, **kwargs):
+        if "clipboard.writeText" in script:
+            seeded["value"] = args[0] if args else None
+            return None
+        if "clipboard.readText" in script:
+            return seeded["value"]
+        if "querySelectorAll" in script:
+            return True
+        return None
+
+    return _side_effect
+
+
+@pytest.mark.asyncio
+async def test_pull_only_stale_clipboard_is_rejected_not_written_to_disk(tmp_path, capsys):
+    local_code = "def handler(pd):\n    return {'ok': True}\n"
+    make_local_script(tmp_path, local_code)
+    syncer = PipedreamSyncer(pull_config(), headless=True)
+
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=stale_clipboard_side_effect())
+    page.locator = MagicMock(return_value=AsyncMock())
+    syncer.page = page
+
+    with patch.object(syncer, "setup_browser_interactive", new_callable=AsyncMock), \
+         patch.object(syncer, "wait_for_login", new_callable=AsyncMock, return_value=True), \
+         patch.object(syncer, "navigate_to_workflow", new_callable=AsyncMock), \
+         patch.object(syncer, "close_step_panel", new_callable=AsyncMock), \
+         patch.object(syncer, "find_and_click_step", new_callable=AsyncMock), \
+         patch.object(syncer, "click_code_tab", new_callable=AsyncMock), \
+         patch.object(syncer, "sync_step", new_callable=AsyncMock) as sync_step, \
+         patch.object(syncer, "update_code", new_callable=AsyncMock) as update_code, \
+         patch.object(syncer, "wait_for_save", new_callable=AsyncMock) as wait_for_save:
+        results = await syncer.pull_all(tmp_path, ["workflow"])
+
+    assert [result.status for result in results] == ["failed"]
+    assert "clipboard" in results[0].message.lower()
+    # The whole point: nothing -- stale or otherwise -- gets written to disk
+    # for a copy that never happened.
+    pulled_path = tmp_path / ".tmp" / "pulled" / "workflow-p_123" / "step.py"
+    assert not pulled_path.exists()
+    sync_step.assert_not_called()
+    update_code.assert_not_called()
+    wait_for_save.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_pull_only_navigation_failure_on_one_workflow_does_not_abort_the_rest(tmp_path, capsys):
     local_code = "def handler(pd):\n    return {'ok': True}\n"
