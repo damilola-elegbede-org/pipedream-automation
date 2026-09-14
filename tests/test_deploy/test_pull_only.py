@@ -13,7 +13,7 @@ from src.deploy.deploy_to_pipedream import (
     build_parser,
     main_async,
 )
-from src.deploy.exceptions import HeadlessAuthenticationError
+from src.deploy.exceptions import HeadlessAuthenticationError, NavigationError
 from src.deploy.utils import build_deploy_header, strip_for_deploy
 
 
@@ -148,6 +148,59 @@ async def test_pull_only_different_content_prints_unified_diff_and_exits_nonzero
     sync_step.assert_not_called()
     update_code.assert_not_called()
     wait_for_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pull_only_navigation_failure_on_one_workflow_does_not_abort_the_rest(tmp_path, capsys):
+    local_code = "def handler(pd):\n    return {'ok': True}\n"
+    make_local_script(tmp_path, local_code)
+    config = DeployConfig(
+        version="1.0",
+        pipedream_base_url="https://pipedream.com",
+        workflows={
+            "broken": WorkflowConfig(
+                id="workflow-p_broken",
+                name="Broken",
+                steps=[StepConfig(step_name="broken-step", script_path="scripts/step.py")],
+            ),
+            "workflow": WorkflowConfig(
+                id="workflow-p_123",
+                name="Workflow",
+                steps=[StepConfig(step_name="step", script_path="scripts/step.py")],
+            ),
+        },
+        settings=DeploySettings(),
+    )
+    syncer = PipedreamSyncer(config, headless=True)
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=evaluate_side_effect(deployed_form(local_code)))
+    page.locator = MagicMock(return_value=AsyncMock())
+    syncer.page = page
+
+    async def navigate_side_effect(workflow_id):
+        if workflow_id == "workflow-p_broken":
+            raise NavigationError(f"Timeout loading workflow {workflow_id}")
+
+    with patch.object(syncer, "setup_browser_interactive", new_callable=AsyncMock), \
+         patch.object(syncer, "wait_for_login", new_callable=AsyncMock, return_value=True), \
+         patch.object(
+             syncer, "navigate_to_workflow", new_callable=AsyncMock, side_effect=navigate_side_effect
+         ) as navigate_to_workflow, \
+         patch.object(syncer, "close_step_panel", new_callable=AsyncMock), \
+         patch.object(syncer, "find_and_click_step", new_callable=AsyncMock), \
+         patch.object(syncer, "click_code_tab", new_callable=AsyncMock), \
+         patch.object(syncer, "sync_step", new_callable=AsyncMock), \
+         patch.object(syncer, "update_code", new_callable=AsyncMock), \
+         patch.object(syncer, "wait_for_save", new_callable=AsyncMock):
+        results = await syncer.pull_all(tmp_path, ["broken", "workflow"])
+
+    # The broken workflow's step is recorded failed, not silently dropped, and
+    # the second workflow still gets pulled and read — the whole run does not
+    # abort on the first workflow's navigation failure.
+    assert [r.status for r in results] == ["failed", "match"]
+    assert "Navigation failed" in results[0].message
+    assert results[1].step_name == "step"
+    assert navigate_to_workflow.await_count == 2
 
 
 @pytest.mark.asyncio

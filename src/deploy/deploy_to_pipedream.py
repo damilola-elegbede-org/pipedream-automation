@@ -1868,7 +1868,21 @@ class PipedreamSyncer:
             for key in keys_to_pull:
                 workflow = self.config.get_workflow(key)
                 self.log(f"  [{key}] {workflow.name}")
-                await self.navigate_to_workflow(workflow.id)
+                try:
+                    await self.navigate_to_workflow(workflow.id)
+                except NavigationError as error:
+                    self.log(f"    X {workflow.name}: navigation failed: {error}", "error")
+                    for step in workflow.steps:
+                        pull_results.append(
+                            PullResult(
+                                step_name=step.step_name,
+                                script_path=step.script_path,
+                                pulled_path=str(pulled_dir / f"{step.step_name}.py"),
+                                status="failed",
+                                message=f"Navigation failed: {error}",
+                            )
+                        )
+                    continue
                 for step in workflow.steps:
                     pull_results.append(
                         await self.pull_step(workflow.id, step, base_path, pulled_dir)
