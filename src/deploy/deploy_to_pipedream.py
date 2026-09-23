@@ -9,6 +9,7 @@ Usage:
     python -m src.deploy.deploy_to_pipedream                    # Interactive login
     python -m src.deploy.deploy_to_pipedream --workflow gmail_to_notion
     python -m src.deploy.deploy_to_pipedream --dry-run
+    python -m src.deploy.deploy_to_pipedream --pull-only [--workflow KEY]
 """
 
 from __future__ import annotations
@@ -16,11 +17,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime
+import difflib
 import os
 import re
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -76,6 +79,7 @@ from .utils import (  # noqa: F401
     read_deploy_payload,
     read_script_content,
     save_cookies_to_env_local,
+    strip_deploy_header,
     validate_cookie_expiration,
 )
 
@@ -192,6 +196,16 @@ class WorkflowResult:
     status: str  # "success", "partial", "failed", "skipped"
     steps: list[StepResult] = field(default_factory=list)
     error: Optional[str] = None
+
+
+@dataclass
+class PullResult:
+    """Result of reading and comparing one deployed step without changing it."""
+    step_name: str
+    script_path: str
+    pulled_path: str
+    status: str  # "match", "different", "failed"
+    message: str = ""
 
 
 class PipedreamSyncer:
@@ -313,21 +327,31 @@ class PipedreamSyncer:
         await self.context.grant_permissions(["clipboard-read", "clipboard-write"])
         self.log("Browser ready", "debug")
 
-    async def teardown_browser(self) -> None:
-        """Close browser and clean up."""
+    async def teardown_browser(self, cache_cookies: bool = True) -> None:
+        """Close browser and clean up.
+
+        Pull-only checks deliberately opt out of cookie caching.  They only need
+        the existing persistent session and must not write credential files.
+        """
         if self.context:
-            # Save cookies before closing
-            try:
-                cookies = await self.context.cookies()
-                pipedream_cookies = [
-                    c for c in cookies
-                    if "pipedream.com" in c.get("domain", "")
-                ]
-                if pipedream_cookies:
-                    save_cookies_to_env_local(pipedream_cookies)
-                    self.log("Cookies cached for future use", "debug")
-            except Exception as e:
-                self.log(f"Failed to cache cookies: {e}", "debug")
+            if cache_cookies:
+                # Save cookies before closing for the existing deploy/login
+                # paths.  Pull-only mode passes cache_cookies=False above.
+                try:
+                    cookies = await self.context.cookies()
+                    def _is_pipedream_domain(domain: str) -> bool:
+                        host = domain.lstrip(".")
+                        return host == "pipedream.com" or host.endswith(".pipedream.com")
+
+                    pipedream_cookies = [
+                        c for c in cookies
+                        if _is_pipedream_domain(c.get("domain", ""))
+                    ]
+                    if pipedream_cookies:
+                        save_cookies_to_env_local(pipedream_cookies)
+                        self.log("Cookies cached for future use", "debug")
+                except Exception as e:
+                    self.log(f"Failed to cache cookies: {e}", "debug")
 
             await self.context.close()
 
@@ -1000,6 +1024,91 @@ class PipedreamSyncer:
 
         self.log("Code update complete", "info")
 
+    async def read_code(self) -> str:
+        """Read the full source from the largest visible Pipedream code editor.
+
+        CodeMirror 6 and Monaco virtualize their rendered DOM: for any step
+        longer than the editor viewport, `.cm-content` / `.view-lines`
+        innerText only contains the lines currently drawn, silently
+        truncating the result. Select-all + copy pulls from the editor's
+        underlying document model instead of the rendered DOM, so it returns
+        the complete source regardless of virtualization -- the same
+        technique the post-deploy verification step below already relies on.
+        """
+        if not self.page:
+            raise CodeUpdateError("Browser not initialized")
+
+        editor_found = await self.page.evaluate("""
+            () => {
+                const selectors = ['.cm-editor', '.monaco-editor', '.CodeMirror'];
+                let bestEditor = null;
+                let maxHeight = 0;
+
+                for (const selector of selectors) {
+                    for (const editor of document.querySelectorAll(selector)) {
+                        const rect = editor.getBoundingClientRect();
+                        const style = window.getComputedStyle(editor);
+                        if (rect.width > 100 && rect.height > 100 &&
+                            style.display !== 'none' && style.visibility !== 'hidden' &&
+                            rect.height > maxHeight) {
+                            bestEditor = editor;
+                            maxHeight = rect.height;
+                        }
+                    }
+                }
+
+                if (!bestEditor) return false;
+                bestEditor.setAttribute('data-read-target', 'true');
+                return true;
+            }
+        """)
+
+        if not editor_found:
+            raise CodeUpdateError("No visible editor found to read")
+
+        try:
+            target = self.page.locator('[data-read-target="true"]')
+            await target.click(timeout=5000)
+            await asyncio.sleep(0.2)
+
+            # Security: a keyboard copy can complete without the browser
+            # actually firing the copy event (e.g. the editor lost focus),
+            # in which case readText() below would silently return whatever
+            # was already on the clipboard -- potentially unrelated, sensitive
+            # content that then gets written to the pulled artifact and
+            # printed in the diff. Seed a sentinel first so a no-op copy is
+            # detectable instead of read as real code.
+            sentinel = f"__read_code_sentinel_{uuid.uuid4().hex}__"
+            await self.page.evaluate(
+                "(text) => navigator.clipboard.writeText(text)", sentinel
+            )
+
+            await self.page.keyboard.press("ControlOrMeta+KeyA")
+            await asyncio.sleep(0.2)
+            await self.page.keyboard.press("ControlOrMeta+KeyC")
+            await asyncio.sleep(0.3)
+
+            code = await self.page.evaluate("navigator.clipboard.readText()")
+            if code == sentinel:
+                raise CodeUpdateError(
+                    "Copy operation did not update the clipboard; refusing to "
+                    "read stale clipboard content"
+                )
+        finally:
+            await self.page.evaluate("""
+                () => {
+                    const el = document.querySelector('[data-read-target]');
+                    if (el) el.removeAttribute('data-read-target');
+                }
+            """)
+            # Security: clear the clipboard so the step's source doesn't
+            # linger there after the read (mirrors update_code's cleanup).
+            await self.page.evaluate("() => navigator.clipboard.writeText('')")
+
+        if not isinstance(code, str):
+            raise CodeUpdateError("Could not read code from visible editor")
+        return code
+
     async def wait_for_save(self) -> bool:
         """Wait for save to complete after Cmd+S."""
         if not self.page:
@@ -1669,6 +1778,140 @@ class PipedreamSyncer:
 
         return self.results
 
+    async def pull_step(
+        self,
+        workflow_id: str,
+        step: StepConfig,
+        base_path: Path,
+        pulled_dir: Path,
+    ) -> PullResult:
+        """Read one deployed step and compare it with its local source file.
+
+        This is intentionally separate from sync_step instead of sharing a
+        mode flag: the pull path has no references to update_code or
+        wait_for_save, making it unable to write a Pipedream workflow.
+        """
+        step_name = step.step_name
+        pulled_path = pulled_dir / f"{step_name}.py"
+
+        try:
+            # A step name is used as a local filename, so reject a configured
+            # name that could escape .tmp/pulled.
+            if Path(step_name).name != step_name or step_name in {"", ".", ".."}:
+                raise PipedreamSyncError(f"Unsafe step name for pull output: {step_name!r}")
+
+            # Two workflows can configure steps with the same step_name; a
+            # flat pulled_dir would let the later pull overwrite the earlier
+            # one and diff against the wrong deployed step. Namespace by
+            # workflow_id, applying the same path-escape check as step_name.
+            if Path(workflow_id).name != workflow_id or workflow_id in {"", ".", ".."}:
+                raise PipedreamSyncError(f"Unsafe workflow id for pull output: {workflow_id!r}")
+
+            workflow_pulled_dir = pulled_dir / workflow_id
+            workflow_pulled_dir.mkdir(parents=True, exist_ok=True)
+            pulled_path = workflow_pulled_dir / f"{step_name}.py"
+
+            await self.close_step_panel()
+            await self.find_and_click_step(step_name)
+            await self.click_code_tab()
+            pulled_code = await self.read_code()
+
+            pulled_path.write_text(pulled_code, encoding="utf-8")
+
+            # Compare against what deploy actually PASTES, not the raw source on
+            # disk: sync_step deploys build_deploy_header() + strip_for_deploy(
+            # source) (see read_deploy_payload), stripping comments/docstrings.
+            # A byte-for-byte diff against the raw file would report drift on
+            # every step this tool has ever deployed. read_deploy_payload also
+            # carries the path-containment check read_script_content applies —
+            # do not read step.script_path directly here.
+            expected_payload = read_deploy_payload(step.script_path, base_path)
+            deployed_code = strip_deploy_header(pulled_code)
+
+            diff = "".join(
+                difflib.unified_diff(
+                    expected_payload.splitlines(keepends=True),
+                    deployed_code.splitlines(keepends=True),
+                    fromfile=f"{step.script_path} (stripped payload)",
+                    tofile=str(pulled_path.relative_to(base_path)),
+                )
+            )
+
+            if diff:
+                print(diff, end="" if diff.endswith("\n") else "\n")
+                return PullResult(
+                    step_name=step_name,
+                    script_path=step.script_path,
+                    pulled_path=str(pulled_path),
+                    status="different",
+                    message="Deployed code differs from local script",
+                )
+
+            self.log(f"    = {step_name}: deployed code matches local script")
+            return PullResult(
+                step_name=step_name,
+                script_path=step.script_path,
+                pulled_path=str(pulled_path),
+                status="match",
+            )
+        except Exception as error:
+            self.log(f"    X {step_name}: pull failed: {error}", "error")
+            return PullResult(
+                step_name=step_name,
+                script_path=step.script_path,
+                pulled_path=str(pulled_path),
+                status="failed",
+                message=str(error),
+            )
+
+    async def pull_all(
+        self, base_path: Path, workflow_keys: Optional[list[str]] = None
+    ) -> list[PullResult]:
+        """Pull configured Pipedream editor contents and report exact drift.
+
+        Unlike sync_all this only navigates, reads editor text, and writes local
+        artifacts under .tmp/pulled.  It never calls any deployment method.
+        """
+        keys_to_pull = workflow_keys or list(self.config.workflows.keys())
+        pulled_dir = base_path / ".tmp" / "pulled"
+        pulled_dir.mkdir(parents=True, exist_ok=True)
+        pull_results: list[PullResult] = []
+
+        print(f"\nPulling {len(keys_to_pull)} workflow(s) for drift checks...")
+        try:
+            await self.setup_browser_interactive()
+            if not await self.wait_for_login():
+                raise AuthenticationError("Login failed or timed out")
+
+            for key in keys_to_pull:
+                workflow = self.config.get_workflow(key)
+                self.log(f"  [{key}] {workflow.name}")
+                try:
+                    await self.navigate_to_workflow(workflow.id)
+                except NavigationError as error:
+                    self.log(f"    X {workflow.name}: navigation failed: {error}", "error")
+                    for step in workflow.steps:
+                        pull_results.append(
+                            PullResult(
+                                step_name=step.step_name,
+                                script_path=step.script_path,
+                                pulled_path=str(pulled_dir / f"{step.step_name}.py"),
+                                status="failed",
+                                message=f"Navigation failed: {error}",
+                            )
+                        )
+                    continue
+                for step in workflow.steps:
+                    pull_results.append(
+                        await self.pull_step(workflow.id, step, base_path, pulled_dir)
+                    )
+        finally:
+            # Do not write credential/cache files as a side effect of a
+            # read-only drift check.
+            await self.teardown_browser(cache_cookies=False)
+
+        return pull_results
+
     async def seed_login(self) -> None:
         """Perform the one-time headed login without changing any workflow."""
         try:
@@ -1682,6 +1925,8 @@ class PipedreamSyncer:
 
 async def main_async(args: argparse.Namespace) -> int:
     """Async main function."""
+    pull_only = getattr(args, "pull_only", False)
+
     # Load .env.local
     load_and_set_env_local()
 
@@ -1722,7 +1967,9 @@ async def main_async(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         verbose=args.verbose,
         screenshot_always=args.screenshot_always,
-        headless=args.headless,
+        # Pull checks are unattended by design: they use the same persisted,
+        # headless authenticated-session contract as --headless deploys.
+        headless=args.headless or pull_only,
         login_timeout_sec=args.login_timeout,
     )
 
@@ -1730,6 +1977,9 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.seed_login:
             await syncer.seed_login()
             return 0
+        if pull_only:
+            pull_results = await syncer.pull_all(base_path, workflow_keys)
+            return 1 if any(result.status != "match" for result in pull_results) else 0
         results = await syncer.sync_all(base_path, workflow_keys)
     except HeadlessAuthenticationError as e:
         print(f"\nERROR: Sync failed: {e}")
@@ -1804,12 +2054,16 @@ Examples:
   Dry run (validate only):
     python -m src.deploy.deploy_to_pipedream --dry-run
 
+  Pull deployed code and check it against local scripts (headless):
+    python -m src.deploy.deploy_to_pipedream --pull-only
+    python -m src.deploy.deploy_to_pipedream --pull-only --workflow gmail_to_notion
+
   Seed the persistent browser login for unattended deploys:
     python -m src.deploy.deploy_to_pipedream --seed-login
 
 Exit codes:
   0  success
-  1  general deployment or configuration failure
+  1  deployment/configuration failure, or --pull-only found drift
   2  --headless profile is not authenticated; run --seed-login
         """,
     )
@@ -1831,6 +2085,14 @@ Exit codes:
             "persistent profile without deploying"
         ),
     )
+    mode.add_argument(
+        "--pull-only",
+        action="store_true",
+        help=(
+            "Headlessly read deployed editor contents into .tmp/pulled and "
+            "print diffs; exits 1 on drift and never updates Pipedream"
+        ),
+    )
     parser.add_argument(
         "--login-timeout",
         type=positive_int,
@@ -1845,7 +2107,7 @@ Exit codes:
     )
     parser.add_argument(
         "--workflow",
-        help="Sync only this workflow (by key)",
+        help="Sync or pull only this workflow (by key)",
     )
     parser.add_argument(
         "--dry-run",
