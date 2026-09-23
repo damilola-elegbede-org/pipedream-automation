@@ -80,6 +80,7 @@ from .utils import (  # noqa: F401
     read_script_content,
     save_cookies_to_env_local,
     strip_deploy_header,
+    strip_for_deploy,
     validate_cookie_expiration,
 )
 
@@ -1825,8 +1826,31 @@ class PipedreamSyncer:
             # every step this tool has ever deployed. read_deploy_payload also
             # carries the path-containment check read_script_content applies —
             # do not read step.script_path directly here.
+            #
+            # A step pasted before ENG-1980 added strip-at-deploy still
+            # carries its full comments/docstrings live, which otherwise
+            # diffs as "different" against every functionally-identical step
+            # nobody has redeployed since (ENG-1933 AC6 false positive, all 6
+            # non-horizon steps at the time this was found) — that legacy
+            # payload needs one strip_for_deploy() pass to match. But every
+            # step deployed since ENG-1980 already carries a stripped payload
+            # (sync_step pastes strip_for_deploy(source), not source), so
+            # re-stripping it here is a second pass over already-stripped
+            # code — and strip_for_deploy is not idempotent: a docstring
+            # followed by a standalone string expression loses that second
+            # string on the second pass, because with the real docstring
+            # gone the standalone string becomes body[0], which is Python's
+            # own definition of a docstring. Compare the header-stripped pull
+            # directly first — the common, already-normalized case — and
+            # only fall back to a single strip_for_deploy() pass (matching
+            # read_deploy_payload's single pass exactly) when that direct
+            # comparison fails, i.e. the legacy-unstripped case.
             expected_payload = read_deploy_payload(step.script_path, base_path)
-            deployed_code = strip_deploy_header(pulled_code)
+            deployed_after_header = strip_deploy_header(pulled_code)
+            if deployed_after_header == expected_payload:
+                deployed_code = deployed_after_header
+            else:
+                deployed_code = strip_for_deploy(deployed_after_header)
 
             diff = "".join(
                 difflib.unified_diff(
