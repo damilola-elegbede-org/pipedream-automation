@@ -150,6 +150,48 @@ async def test_pull_only_different_content_prints_unified_diff_and_exits_nonzero
     wait_for_save.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_pull_only_docstring_then_standalone_string_does_not_false_positive(tmp_path, capsys):
+    """strip_for_deploy is only safe to apply once. A handler with a real
+    docstring followed by an unrelated standalone string expression already
+    has that docstring stripped by the time it lands in Pipedream (deployed_
+    form() below applies strip_for_deploy exactly like sync_step does); a
+    second strip_for_deploy pass on the pulled side would treat the surviving
+    standalone string as the new "docstring" (Python's own body[0]-is-a-
+    string-Expr rule) and remove it too, producing a spurious diff between
+    identical payloads."""
+    local_code = (
+        "def handler(pd):\n"
+        "    '''Real docstring.'''\n"
+        "    'unrelated standalone string, not a docstring'\n"
+        "    return {'ok': True}\n"
+    )
+    make_local_script(tmp_path, local_code)
+    syncer = PipedreamSyncer(pull_config(), headless=True)
+    page = AsyncMock()
+    page.evaluate = AsyncMock(side_effect=evaluate_side_effect(deployed_form(local_code)))
+    page.locator = MagicMock(return_value=AsyncMock())
+    syncer.page = page
+
+    with patch.object(syncer, "setup_browser_interactive", new_callable=AsyncMock), \
+         patch.object(syncer, "wait_for_login", new_callable=AsyncMock, return_value=True), \
+         patch.object(syncer, "navigate_to_workflow", new_callable=AsyncMock), \
+         patch.object(syncer, "close_step_panel", new_callable=AsyncMock), \
+         patch.object(syncer, "find_and_click_step", new_callable=AsyncMock), \
+         patch.object(syncer, "click_code_tab", new_callable=AsyncMock), \
+         patch.object(syncer, "sync_step", new_callable=AsyncMock) as sync_step, \
+         patch.object(syncer, "update_code", new_callable=AsyncMock) as update_code, \
+         patch.object(syncer, "wait_for_save", new_callable=AsyncMock) as wait_for_save:
+        results = await syncer.pull_all(tmp_path, ["workflow"])
+
+    assert [result.status for result in results] == ["match"]
+    output = capsys.readouterr().out
+    assert "--- scripts/step.py" not in output
+    sync_step.assert_not_called()
+    update_code.assert_not_called()
+    wait_for_save.assert_not_called()
+
+
 def legacy_deployed_form(local_source: str) -> str:
     """What a step deployed BEFORE ENG-1980's strip-at-deploy still carries
     live: the header, plus the source verbatim, comments and docstrings
