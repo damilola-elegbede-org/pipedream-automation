@@ -80,6 +80,7 @@ from .utils import (  # noqa: F401
     read_script_content,
     save_cookies_to_env_local,
     strip_deploy_header,
+    strip_for_deploy,
     validate_cookie_expiration,
 )
 
@@ -1825,8 +1826,15 @@ class PipedreamSyncer:
             # every step this tool has ever deployed. read_deploy_payload also
             # carries the path-containment check read_script_content applies —
             # do not read step.script_path directly here.
+            #
+            # The pulled side needs the identical strip_for_deploy() pass: a
+            # step pasted before ENG-1980 added strip-at-deploy still carries
+            # its full comments/docstrings live, which otherwise diffs as
+            # "different" against every functionally-identical step nobody
+            # has redeployed since (ENG-1933 AC6 false positive, all 6
+            # non-horizon steps at the time this was found).
             expected_payload = read_deploy_payload(step.script_path, base_path)
-            deployed_code = strip_deploy_header(pulled_code)
+            deployed_code = strip_for_deploy(strip_deploy_header(pulled_code))
 
             diff = "".join(
                 difflib.unified_diff(
