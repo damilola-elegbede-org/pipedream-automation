@@ -269,3 +269,30 @@ class TestClaudeRequestShape:
         payload = mock_post.call_args[1]["json"]
         assert payload["model"] == "claude-sonnet-5-5"
         assert payload["thinking"] == {"type": "between_tools"}
+
+    @pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
+    @patch('steps.create_notion_task.requests.post')
+    def test_unusable_stop_reason_raises(self, mock_post, stop_reason):
+        from steps.create_notion_task import call_claude
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "stop_reason": stop_reason,
+            "content": [{"type": "text", "text": '{"summary": "trunc'}],
+        }
+        mock_post.return_value = mock_response
+
+        with pytest.raises(ValueError, match=stop_reason):
+            call_claude("Test", "k")
+
+    @patch('steps.create_notion_task.requests.post')
+    def test_token_cap_leaves_room_for_new_tokenizer(self, mock_post):
+        from steps.create_notion_task import call_claude
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"content": [{"type": "text", "text": "ok"}]}
+        mock_post.return_value = mock_response
+
+        call_claude("Test", "k")
+
+        assert mock_post.call_args[1]["json"]["max_tokens"] == 4096

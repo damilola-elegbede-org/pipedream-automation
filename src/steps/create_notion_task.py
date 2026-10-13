@@ -87,7 +87,7 @@ CLAUDE_THINKING = {"type": "between_tools"}
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 
-def call_claude(prompt, anthropic_key, max_tokens=2048):
+def call_claude(prompt, anthropic_key, max_tokens=4096):
     """
     Call Claude API with the given prompt.
 
@@ -118,6 +118,11 @@ def call_claude(prompt, anthropic_key, max_tokens=2048):
     )
 
     data = response.json()
+    # A refusal arrives as HTTP 200 with no text; a max_tokens stop leaves
+    # truncated JSON that the parser would turn into empty defaults.
+    stop_reason = data.get("stop_reason")
+    if stop_reason in ("refusal", "max_tokens"):
+        raise ValueError(f"Claude stopped with stop_reason={stop_reason}; no usable analysis")
     content = data.get("content", [])
     if content and len(content) > 0:
         # Concatenate all text blocks (API may return multiple content blocks)

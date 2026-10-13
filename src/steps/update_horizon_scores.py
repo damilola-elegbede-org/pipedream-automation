@@ -826,7 +826,7 @@ def save_rubric_to_notion(rubric_text, page_id, headers, session=None):
     return True
 
 
-def call_claude(prompt, anthropic_key, max_tokens=4096, session=None):
+def call_claude(prompt, anthropic_key, max_tokens=16000, session=None):
     """
     Call Claude API with the given prompt.
 
@@ -855,7 +855,7 @@ def call_claude(prompt, anthropic_key, max_tokens=4096, session=None):
     }
 
     response = retry_with_backoff(
-        lambda: http.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=120)
+        lambda: http.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=300)
     )
 
     data = response.json()

@@ -1461,3 +1461,14 @@ class TestClaudeRequestShape:
         payload = mock_post.call_args[1]["json"]
         assert payload["model"] == "claude-opus-5-5"
         assert payload["output_config"] == {"effort": "high"}
+
+    @patch('steps.update_horizon_scores.requests.post')
+    def test_token_cap_leaves_room_for_high_effort_thinking(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"content": [{"type": "text", "text": "ok"}]}
+        mock_post.return_value = mock_response
+
+        call_claude("Test", "k")
+
+        assert mock_post.call_args[1]["json"]["max_tokens"] == 16000
+        assert mock_post.call_args[1]["timeout"] == 300
