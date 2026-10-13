@@ -32,7 +32,9 @@ class HorizonScoringError(Exception):
 
 # --- Configuration ---
 NOTION_API_VERSION = "2022-06-28"
-CLAUDE_MODEL = "claude-opus-5"
+CLAUDE_MODEL = "claude-opus-5-5"
+# Opus 5.5 defaults to medium effort; Opus 5 defaulted to high. Pin it.
+CLAUDE_EFFORT = "high"
 # Bump whenever the scoring FORMULA changes (not the model or rubric text).
 # A mismatch against state["scoring_formula_version"] forces a full
 # rescan (ENG-1756) — otherwise the incremental path only rescoring
@@ -824,7 +826,7 @@ def save_rubric_to_notion(rubric_text, page_id, headers, session=None):
     return True
 
 
-def call_claude(prompt, anthropic_key, max_tokens=4096, session=None):
+def call_claude(prompt, anthropic_key, max_tokens=16000, session=None):
     """
     Call Claude API with the given prompt.
 
@@ -846,13 +848,14 @@ def call_claude(prompt, anthropic_key, max_tokens=4096, session=None):
     payload = {
         "model": CLAUDE_MODEL,
         "max_tokens": max_tokens,
+        "output_config": {"effort": CLAUDE_EFFORT},
         "messages": [
             {"role": "user", "content": prompt}
         ]
     }
 
     response = retry_with_backoff(
-        lambda: http.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=120)
+        lambda: http.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=300)
     )
 
     data = response.json()

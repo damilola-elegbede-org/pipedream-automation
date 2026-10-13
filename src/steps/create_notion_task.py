@@ -80,11 +80,14 @@ NOTION_API_VERSION = "2022-06-28"
 MAX_CODE_BLOCK_LENGTH = 2000
 
 # Claude API configuration
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+CLAUDE_MODEL = "claude-sonnet-5-5"
+# Sonnet 5.5 thinks by default and thinking spends max_tokens; between_tools
+# keeps this extraction thinking-off, as it was on Sonnet 4.
+CLAUDE_THINKING = {"type": "between_tools"}
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 
-def call_claude(prompt, anthropic_key, max_tokens=2048):
+def call_claude(prompt, anthropic_key, max_tokens=4096):
     """
     Call Claude API with the given prompt.
 
@@ -104,6 +107,7 @@ def call_claude(prompt, anthropic_key, max_tokens=2048):
     payload = {
         "model": CLAUDE_MODEL,
         "max_tokens": max_tokens,
+        "thinking": CLAUDE_THINKING,
         "messages": [
             {"role": "user", "content": prompt}
         ]
@@ -114,6 +118,11 @@ def call_claude(prompt, anthropic_key, max_tokens=2048):
     )
 
     data = response.json()
+    # A refusal arrives as HTTP 200 with no text; a max_tokens stop leaves
+    # truncated JSON that the parser would turn into empty defaults.
+    stop_reason = data.get("stop_reason")
+    if stop_reason in ("refusal", "max_tokens"):
+        raise ValueError(f"Claude stopped with stop_reason={stop_reason}; no usable analysis")
     content = data.get("content", [])
     if content and len(content) > 0:
         # Concatenate all text blocks (API may return multiple content blocks)
