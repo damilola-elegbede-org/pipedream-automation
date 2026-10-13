@@ -32,7 +32,9 @@ class HorizonScoringError(Exception):
 
 # --- Configuration ---
 NOTION_API_VERSION = "2022-06-28"
-CLAUDE_MODEL = "claude-opus-5"
+CLAUDE_MODEL = "claude-opus-5-5"
+# Opus 5.5 defaults to medium effort; Opus 5 defaulted to high. Pin it.
+CLAUDE_EFFORT = "high"
 # Bump whenever the scoring FORMULA changes (not the model or rubric text).
 # A mismatch against state["scoring_formula_version"] forces a full
 # rescan (ENG-1756) — otherwise the incremental path only rescoring
@@ -846,6 +848,7 @@ def call_claude(prompt, anthropic_key, max_tokens=4096, session=None):
     payload = {
         "model": CLAUDE_MODEL,
         "max_tokens": max_tokens,
+        "output_config": {"effort": CLAUDE_EFFORT},
         "messages": [
             {"role": "user", "content": prompt}
         ]

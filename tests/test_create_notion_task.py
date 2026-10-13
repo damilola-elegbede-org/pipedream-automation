@@ -251,3 +251,21 @@ class TestHandler:
         assert len(result["successful_mappings"]) == 1
         assert result["successful_mappings"][0]["notion_page_id"] == "new_page_id"
         assert result["successful_mappings"][0].get("skipped") is None
+
+
+class TestClaudeRequestShape:
+    """Sonnet 5.5 thinks by default; this extraction must stay thinking-off."""
+
+    @patch('steps.create_notion_task.requests.post')
+    def test_sends_current_model_with_thinking_off(self, mock_post):
+        from steps.create_notion_task import call_claude
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"content": [{"type": "text", "text": "ok"}]}
+        mock_post.return_value = mock_response
+
+        assert call_claude("Test", "k") == "ok"
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["model"] == "claude-sonnet-5-5"
+        assert payload["thinking"] == {"type": "between_tools"}

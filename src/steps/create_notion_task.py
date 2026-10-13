@@ -80,7 +80,10 @@ NOTION_API_VERSION = "2022-06-28"
 MAX_CODE_BLOCK_LENGTH = 2000
 
 # Claude API configuration
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+CLAUDE_MODEL = "claude-sonnet-5-5"
+# Sonnet 5.5 thinks by default and thinking spends max_tokens; between_tools
+# keeps this extraction thinking-off, as it was on Sonnet 4.
+CLAUDE_THINKING = {"type": "between_tools"}
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 
@@ -104,6 +107,7 @@ def call_claude(prompt, anthropic_key, max_tokens=2048):
     payload = {
         "model": CLAUDE_MODEL,
         "max_tokens": max_tokens,
+        "thinking": CLAUDE_THINKING,
         "messages": [
             {"role": "user", "content": prompt}
         ]
