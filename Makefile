@@ -7,7 +7,7 @@ test:
 	pytest
 
 test-cov:
-	pytest --cov=src --cov-report=term-missing --cov-report=html
+	pytest --cov=src/steps --cov-report=term-missing --cov-report=html
 
 format:
 	black src tests
