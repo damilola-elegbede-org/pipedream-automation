@@ -1,7 +1,6 @@
 [run]
-source = src/deploy
+source = src/steps
 omit =
-    src/steps/*
     */__init__.py
 
 [report]
