@@ -37,13 +37,6 @@ reviews:
         - Type hints and docstrings
         - Secure credential handling
 
-    - path: "src/deploy/**/*.py"
-      instructions: |
-        Deployment automation. Review for:
-        - Browser automation reliability
-        - Error recovery patterns
-        - Configuration validation
-
     - path: "tests/**/*.py"
       instructions: |
         Test files. Review for:

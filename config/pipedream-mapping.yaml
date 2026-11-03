@@ -8,9 +8,9 @@
 #   PIPEDREAM_WORKFLOW_GCAL_TO_NOTION      - Workflow ID for GCal to Notion
 #   PIPEDREAM_WORKFLOW_HORIZON_SCORES      - Workflow ID for Horizon Score Updater
 #
-# Usage:
-#   python -m src.deploy.deploy_to_pipedream --config config/pipedream-mapping.yaml
-#   python -m src.deploy.deploy_to_pipedream --workflow gmail_to_notion --dry-run
+# NOTE (ENG-3021): the Playwright deploy tool that read this file was removed. The file is kept as the
+# inventory of the five workflows and their step scripts; changes go in by manual paste until the workflows
+# are replaced by the BareClaude runners (clara/scripts/gtd_sync/ in the bareclaude repo).
 
 version: "1.0"
 
