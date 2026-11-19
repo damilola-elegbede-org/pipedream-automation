@@ -1,0 +1,41 @@
+name: Cache cleanup
+
+on:
+  schedule:
+    - cron: '17 9 1 * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete caches not used in 3+ days
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          cutoff=$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          echo "Deleting caches last accessed before ${cutoff}"
+          # Listing must succeed; a failure here fails the job.
+          gh api --paginate "repos/${REPO}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | [.id, .last_accessed_at] | @tsv' > caches.tsv
+          deleted=0
+          kept=0
+          while IFS=$'\t' read -r id accessed; do
+            # ISO-8601 UTC timestamps compare correctly as strings.
+            if [[ "${accessed}" < "${cutoff}" ]]; then
+              if gh api -X DELETE "repos/${REPO}/actions/caches/${id}" > /dev/null; then
+                deleted=$((deleted + 1))
+              else
+                echo "Failed to delete cache ${id}; continuing"
+                kept=$((kept + 1))
+              fi
+            else
+              kept=$((kept + 1))
+            fi
+          done < caches.tsv
+          echo "Deleted ${deleted} caches, kept ${kept}"
